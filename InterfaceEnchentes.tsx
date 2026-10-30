@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 
-// formato dos alertas
+{/* formato dos alertas */}
 
 export type NivelAlerta = "alto" | "moderado" | "baixo";
 
@@ -15,7 +15,7 @@ export type AlertaEnchente = {
   horario?: string;
 };
 
-// informações pra puxar do mapa
+{/* informações pra puxar do mapa */}
 
 type Props = {
   alertas?: AlertaEnchente[];
