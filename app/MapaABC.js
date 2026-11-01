@@ -15,10 +15,21 @@ const RAIO_RISCO_M = 150;
 const OFFSET_FUGA = 0.003;
 const DEBOUNCE_MS = 350;
 const MIN_CHARS = 3;
-const RAIO_CHEGADA_M = 30;      // a partir daqui consideramos que o usuário chegou
-const LIMITE_FORA_ROTA_M = 60;  // distância mínima da rota para avisar "fora da rota"
+const MAX_ALTERNATIVAS = 2;     // pedido ao OSRM → até 3 rotas no total (principal + 2)
+const MAX_ROTAS = 3;
+const RAIO_CHEGADA_M = 30;
+const LIMITE_FORA_ROTA_M = 60;
 
-// Interruptor da integração GTFS. Veja os pontos [GTFS-1] e [GTFS-2] abaixo.
+// ── Câmera imersiva (perspectiva simulada via CSS) ──
+const PERSPECTIVA_PX = 1000;              // perspective(1000px)
+const INCLINACAO_GRAUS = 55;              // rotateX(55deg)
+const MARCADOR_ALTURA_TELA = 0.75;        // onde o marcador aparece na visão 3D (0 = topo, 1 = base)
+const ROTACIONAR_MAPA_NA_VISAO_3D = true; // true: "heading-up" (frente do motorista sempre para cima)
+const ZOOM_NAVEGACAO = 17;                // zoom mínimo na visão superior
+const ZOOM_IMERSIVO = 18;                 // zoom mínimo na visão imersiva
+const DURACAO_TRANSICAO_MS = 800;         // suavidade da mudança de ângulo
+
+// Interruptor da integração GTFS (veja [GTFS-1] e [GTFS-2]).
 const TRANSPORTE_PUBLICO_REAL = false;
 
 // Cada modo aponta para uma instância OSRM com o perfil correspondente
@@ -27,7 +38,7 @@ const MODOS = {
     driving: {
         rotulo: 'Carro', icone: 'car',
         servico: 'https://routing.openstreetmap.de/routed-car/route/v1',
-        estilo: { color: '#2563eb', weight: 6, opacity: 0.9 }
+        estilo: { color: '#2563eb', weight: 6, opacity: 0.95 }
     },
     foot: {
         rotulo: 'A pé', icone: 'walk',
@@ -37,11 +48,10 @@ const MODOS = {
     bike: {
         rotulo: 'Bicicleta', icone: 'bike',
         servico: 'https://routing.openstreetmap.de/routed-bike/route/v1',
-        estilo: { color: '#ea580c', weight: 6, opacity: 0.9 }
+        estilo: { color: '#ea580c', weight: 6, opacity: 0.95 }
     },
     transit: {
         rotulo: 'Transporte público', icone: 'bus',
-        // Enquanto não há GTFS, o OSRM só fornece o "corredor" viário; os trechos são simulados.
         servico: 'https://routing.openstreetmap.de/routed-car/route/v1',
         estilo: { color: '#7c3aed', weight: 6, opacity: 0.35 },
         aviso:
@@ -49,7 +59,6 @@ const MODOS = {
     }
 };
 
-// Estilos dos trechos da Rota Mista desenhados sobre o mapa
 const ESTILOS_TRECHO = {
     caminhada: { color: '#16a34a', weight: 6, opacity: 0.95, dashArray: '1, 12', lineCap: 'round' },
     onibus: { color: '#7c3aed', weight: 7, opacity: 0.95 },
@@ -72,7 +81,8 @@ const ICONES = {
     back: 'M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z',
     navigation: 'M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z',
     locate: 'M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z',
-    list: 'M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z'
+    list: 'M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z',
+    compass: 'M12 10.9c-.61 0-1.1.49-1.1 1.1s.49 1.1 1.1 1.1c.61 0 1.1-.49 1.1-1.1s-.49-1.1-1.1-1.1zM12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm2.19 12.19L6 18l3.81-8.19L18 6l-3.81 8.19z'
 };
 
 function Icone({ nome, size = 20, rotacao = 0 }) {
@@ -105,6 +115,8 @@ function distanciaPontoSegmentoM(p, a, b) {
 }
 
 // Primeira zona de risco atravessada pela rota (ou null). Independe do modo de transporte.
+// Hoje cada zona é um círculo (lat/lng + 150 m). Se migrar para polígonos reais,
+// esta é a ÚNICA função a trocar (ponto-em-polígono / interseção de segmentos).
 function encontrarColisao(coordenadas, zonas) {
     if (!coordenadas?.length) return null;
     for (const zona of zonas) {
@@ -120,14 +132,12 @@ function encontrarColisao(coordenadas, zonas) {
     return null;
 }
 
-// acum[i] = distância (m) do início da rota até a coordenada i
 function acumularDistancias(coords) {
     const acum = [0];
     for (let i = 1; i < coords.length; i++) acum.push(acum[i - 1] + coords[i - 1].distanceTo(coords[i]));
     return acum;
 }
 
-// Primeiro índice cuja distância acumulada é >= d
 function indiceNaDistancia(acum, d) {
     let lo = 0;
     let hi = acum.length - 1;
@@ -141,6 +151,16 @@ function indiceNaDistancia(acum, d) {
 
 function fatiarCoordenadas(coords, acum, d0, d1) {
     return coords.slice(indiceNaDistancia(acum, d0), indiceNaDistancia(acum, d1) + 1);
+}
+
+// Rumo (0–360°, 0 = norte) do ponto a para o ponto b
+function calcularRumo(a, b) {
+    const rad = (g) => (g * Math.PI) / 180;
+    const y = Math.sin(rad(b.lng - a.lng)) * Math.cos(rad(b.lat));
+    const x =
+        Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) -
+        Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(rad(b.lng - a.lng));
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
 // Decodifica polylines codificadas (OTP e Google usam precisão 5).
@@ -165,7 +185,7 @@ function decodificarPolyline(str, precisao = 5) {
     return out;
 }
 
-// Posição do usuário em relação à rota: trecho mais próximo, próximo passo, restante, desvio.
+// Posição do usuário em relação à rota selecionada
 function calcularProgresso(rota, lat, lng, precisao = 0) {
     const c = rota?.coordenadas;
     if (!c || c.length < 2 || !rota.passos.length) return null;
@@ -197,6 +217,35 @@ function calcularProgresso(rota, lat, lng, precisao = 0) {
     };
 }
 
+// ───────────────────────── Câmera imersiva: matemática ─────────────────────────
+
+// Tamanho (px) que o container do mapa precisa ter para preencher a cena depois do tilt.
+// Com rotateX(55deg) a parte distante do plano é muito comprimida: o mapa precisa ser bem maior
+// que a tela. Com rotação (heading-up), o container vira um quadrado que cobre a área visível
+// em qualquer direção.
+function dimensoesCena3D(largura, altura, comRotacao) {
+    const sen = Math.sin((INCLINACAO_GRAUS * Math.PI) / 180);
+    const yLonge = Math.min(900, Math.max(600, altura * 0.95)); // alcance à frente, no plano do mapa
+    const meiaLarguraLonge = (largura / 2) * (1 + (yLonge * sen) / PERSPECTIVA_PX);
+
+    if (!comRotacao) {
+        return { w: Math.ceil(meiaLarguraLonge * 2), h: Math.ceil(yLonge * 2) };
+    }
+    // Limite 1150: acima disso, pontos do plano passam do "olho" da perspectiva (z ≥ 1000px)
+    const raio = Math.min(1150, Math.ceil(Math.hypot(meiaLarguraLonge, yLonge)));
+    return { w: raio * 2, h: raio * 2 };
+}
+
+// Deslocamento (px, no plano do mapa) do centro do mapa em relação ao marcador, para que o
+// marcador apareça em MARCADOR_ALTURA_TELA da altura da tela. Inverte a projeção em perspectiva:
+//   yTela = o·cosθ · P / (P − o·senθ)   →   o = yTela·P / (P·cosθ + yTela·senθ)
+function offsetCameraPx(alturaCena) {
+    const P = PERSPECTIVA_PX;
+    const th = (INCLINACAO_GRAUS * Math.PI) / 180;
+    const yTela = (MARCADOR_ALTURA_TELA - 0.5) * alturaCena; // px abaixo do centro da tela
+    return (yTela * P) / (P * Math.cos(th) + yTela * Math.sin(th));
+}
+
 // ───────────────────────── Utilitários de texto ─────────────────────────
 function formatarSugestao(feature) {
     const p = feature.properties || {};
@@ -226,7 +275,6 @@ function formatarTempo(segundos) {
     return m ? `${h} h ${m} min` : `${h} h`;
 }
 
-// Giro da seta (graus) conforme o tipo de manobra do LRM
 function rotacaoDaManobra(tipo) {
     const mapa = {
         Straight: 0, Head: 0, Continue: 0, StartAt: 0,
@@ -247,15 +295,52 @@ function IconeDoPasso({ passo, size = 20 }) {
     return <Icone nome="arrow" size={size} rotacao={rotacaoDaManobra(passo.manobra)} />;
 }
 
+// ───────────────────────── Roteamento direto (alternativas + desvios) ─────────────────────────
+
+// Promessa em volta de router.route (interface IRouter do LRM)
+function rotearViaRouter(router, pontos, opcoes) {
+    return new Promise((resolve, reject) => {
+        router.route(
+            pontos.map((ll) => L.Routing.waypoint(ll)),
+            (err, rotas) => (err ? reject(err) : resolve(rotas)),
+            null,
+            opcoes
+        );
+    });
+}
+
+// Transforma uma rota do OSRM/LRM em "candidata" (geometria + passos do itinerário)
+function montarCandidata(rota, formatter, desviada) {
+    const coordenadas = rota.coordinates;
+    const acumulada = acumularDistancias(coordenadas);
+    const total = acumulada[acumulada.length - 1] || rota.summary.totalDistance;
+
+    // As instruções cruas do LRM não trazem `text`; o Formatter gera o texto em português.
+    // WaypointReached é o waypoint de fuga: fica invisível no itinerário.
+    const instrucoes = (rota.instructions || []).filter((i) => i.type !== 'WaypointReached');
+    const passos = instrucoes.map((instr, k) => {
+        let texto;
+        try { texto = formatter.formatInstruction(instr, k); } catch { texto = null; }
+        return {
+            id: `m-${k}`,
+            tipo: 'manobra',
+            manobra: instr.type,
+            texto: texto || instr.road || 'Continue',
+            detalhe: instr.distance > 0 ? `por ${formatarDistancia(instr.distance)}` : '',
+            indiceCoord: instr.index
+        };
+    });
+
+    return { id: '', coordenadas, acumulada, total, tempo: rota.summary.totalTime, passos, desviada };
+}
+
 // ───────────────────────── Transporte público: Rota Mista ─────────────────────────
 //
 // Formato que a interface espera de QUALQUER fonte (simulada ou GTFS real):
 //   { simulado: boolean, trechos: Trecho[] }
 //   Trecho = {
 //     modalidade: 'caminhada' | 'onibus' | 'trem',   // trem = trem/metrô/monotrilho
-//     texto:      string,                            // ação ("Embarque no ônibus…")
-//     linha:      string | null,                     // "Linha 10 – Turquesa", "6020-10"…
-//     de, para:   string | undefined,                // nomes das paradas/estações
+//     texto: string, linha: string | null, de?: string, para?: string,
 //     distanciaM: number, duracaoS: number,
 //     coordenadas?: L.LatLng[]                       // geometria própria (API real)
 //   }
@@ -265,34 +350,28 @@ async function obterRotaTransportePublico({ origem, destino, rotaViaria }) {
 
     // ┌─ [GTFS-1] SUBSTITUA ESTE BLOCO PELA SUA API GTFS ────────────────────────
     // 1. Crie um Route Handler (app/api/transporte-publico/route.js) que receba
-    //    ?from=lat,lng&to=lat,lng e chame a API ESCOLHIDA NO SERVIDOR, para a chave
-    //    nunca ir para o bundle do navegador.
+    //    ?from=lat,lng&to=lat,lng e chame a API escolhida NO SERVIDOR (a chave não vai pro navegador).
     // 2. Mude TRANSPORTE_PUBLICO_REAL para true (lá em cima).
-    // 3. Aqui, chame o seu Route Handler e converta a resposta para o formato
-    //    { simulado: false, trechos } descrito acima, SEMPRE com `coordenadas` em
-    //    cada trecho (é a geometria real que será desenhada no mapa).
+    // 3. Aqui, chame o seu Route Handler e converta a resposta para
+    //    { simulado: false, trechos } SEMPRE com `coordenadas` em cada trecho.
     //
     //  OpenTripPlanner (hospedado por você, com GTFS + OSM da região):
     //    GET {OTP}/otp/routers/default/plan?fromPlace=lat,lng&toPlace=lat,lng&mode=TRANSIT,WALK&date=…&time=…
-    //    plan.itineraries[0].legs[] → cada leg tem:
-    //      mode ('WALK' | 'BUS' | 'RAIL' | 'SUBWAY' | 'TRAM'), routeShortName,
-    //      from.name, to.name, distance (m), duration (s), legGeometry.points
-    //    Mapeamento: WALK→'caminhada'; BUS→'onibus'; RAIL/SUBWAY/TRAM→'trem';
-    //                coordenadas = decodificarPolyline(leg.legGeometry.points)
+    //    plan.itineraries[0].legs[] → mode ('WALK'|'BUS'|'RAIL'|'SUBWAY'|'TRAM'), routeShortName,
+    //    from.name, to.name, distance (m), duration (s), legGeometry.points
+    //    WALK→'caminhada'; BUS→'onibus'; RAIL/SUBWAY/TRAM→'trem';
+    //    coordenadas = decodificarPolyline(leg.legGeometry.points)
     //    (parâmetros mudam entre OTP 1.x e 2.x: confira a documentação da sua versão)
     //
     //  Google Routes API:
     //    POST https://routes.googleapis.com/directions/v2:computeRoutes
     //    headers: X-Goog-Api-Key e X-Goog-FieldMask (liste os campos de legs/steps que usar)
     //    body: { origin:{location:{latLng:{latitude,longitude}}}, destination:{…}, travelMode:'TRANSIT' }
-    //    routes[0].legs[0].steps[] → cada step tem:
-    //      travelMode ('WALK' | 'TRANSIT'), distanceMeters, staticDuration (ex.: "420s"),
-    //      polyline.encodedPolyline,
-    //      transitDetails.transitLine { nameShort, vehicle.type } e
-    //      transitDetails.stopDetails { departureStop.name, arrivalStop.name }
-    //    Mapeamento: WALK→'caminhada'; vehicle.type BUS→'onibus'; SUBWAY/HEAVY_RAIL/…→'trem'.
+    //    routes[0].legs[0].steps[] → travelMode ('WALK'|'TRANSIT'), distanceMeters, staticDuration ("420s"),
+    //    polyline.encodedPolyline, transitDetails.transitLine { nameShort, vehicle.type },
+    //    transitDetails.stopDetails { departureStop.name, arrivalStop.name }
     //
-    //  Dados GTFS na região: verifique os feeds publicados por SPTrans, Metrô/CPTM e EMTU.
+    //  Feeds GTFS da região: verifique os publicados por SPTrans, Metrô/CPTM e EMTU.
     // └────────────────────────────────────────────────────────────────────────────
     throw new Error('Integração GTFS ainda não implementada (veja [GTFS-1]).');
 }
@@ -328,8 +407,7 @@ function simularRotaMista(rotaViaria) {
     return { simulado: true, trechos };
 }
 
-// Converte trechos em "passos" (mesma estrutura do itinerário de ruas), com o índice da
-// coordenada onde cada trecho começa — assim a navegação GPS funciona igual nos dois casos.
+// Converte trechos em "passos" (mesma estrutura do itinerário de ruas)
 function montarPassosMistos(trechos, acumulada) {
     let d = 0;
     const passos = trechos.map((t, k) => {
@@ -358,22 +436,20 @@ function montarPassosMistos(trechos, acumulada) {
     return passos;
 }
 
-// Troca dinamicamente o servidor OSRM e o estilo da linha conforme o modo.
+// Troca dinamicamente o servidor OSRM conforme o modo (as linhas são desenhadas por nós).
 function aplicarModoNoRouter(routing, modo) {
-    const cfg = MODOS[modo];
     const router = routing.getRouter?.() || routing._router;
-    if (router) router.options.serviceUrl = cfg.servico;
-    routing.options.lineOptions = { styles: [cfg.estilo] };
+    if (router) router.options.serviceUrl = MODOS[modo].servico;
 }
 
-function ajustarMapa(map, coords) {
-    if (!map || !coords?.length) return;
+function ajustarMapa(map, bounds) {
+    if (!map || !bounds) return;
     const mobile = window.innerWidth <= 640;
-    // O padding evita que o painel (lateral no desktop, "bottom sheet" no mobile) cubra a rota
+    // O padding evita que o painel (lateral no desktop, "bottom sheet" no mobile) cubra as rotas
     map.fitBounds(
-        L.latLngBounds(coords),
+        bounds,
         mobile
-            ? { paddingTopLeft: [24, 24], paddingBottomRight: [24, 300] }
+            ? { paddingTopLeft: [24, 24], paddingBottomRight: [24, 330] }
             : { paddingTopLeft: [430, 40], paddingBottomRight: [40, 40] }
     );
 }
@@ -403,25 +479,40 @@ function ListaPassos({ passos, indiceAtivo = -1, carregando }) {
 
 // ───────────────────────── Componente ─────────────────────────
 export default function MapaABC() {
+    // Refs do DOM
+    const rootRef = useRef(null);
+    const cenaRef = useRef(null);
+
     // Refs do Leaflet
     const mapRef = useRef(null);
     const routingRef = useRef(null);
     const formatterRef = useRef(null);
     const camadaMarcadoresRef = useRef(null);
+    const camadaRotasRef = useRef(null);
+    const camadaRotulosRef = useRef(null);
     const camadaMistaRef = useRef(null);
     const marcadorUsuarioRef = useRef(null);
     const precisaoRef = useRef(null);
 
     // Refs de lógica (evitam closures velhas nos eventos do Leaflet e do GPS)
     const zonasRiscoRef = useRef([]);
-    const tentativaRef = useRef(0); // 0 = rota direta, 1 = desvio já tentado
-    const rotaRef = useRef(null);   // { inicio, fim } da rota pedida
+    const rotaRef = useRef(null);          // { inicio, fim } da rota pedida
     const modoRef = useRef('driving');
     const faseRef = useRef('busca');
     const rotaAtualRef = useRef(null);
-    const reqRef = useRef(0);
+    const candidatasRef = useRef([]);
+    const calcReqRef = useRef(0);          // invalida cálculos antigos (alternativas + desvios)
+    const mistaReqRef = useRef(0);         // invalida montagens antigas da Rota Mista
+    const altNumericoRef = useRef(true);   // true: alternatives=2; false: alternatives=true
+    const processarRotasRef = useRef(null);
+    const selecionarRotaRef = useRef(null);
+
+    // Refs do GPS / câmera
     const seguirRef = useRef(true);
     const ultimaPosRef = useRef(null);
+    const refRumoRef = useRef(null);       // último ponto usado para deduzir o rumo
+    const anguloRef = useRef(0);           // ângulo "desenrolado" (seta + giro do mapa)
+    const cameraImersivaRef = useRef(false);
     const watchIdRef = useRef(null);
     const wakeLockRef = useRef(null);
 
@@ -439,11 +530,18 @@ export default function MapaABC() {
     const [emPerigo, setEmPerigo] = useState(false);
     const [erroRota, setErroRota] = useState('');
     const [fase, setFase] = useState('busca'); // 'busca' | 'itinerario' | 'navegando'
+    const [candidatas, setCandidatas] = useState([]);
+    const [selecionada, setSelecionada] = useState(0);
+    const [bloqueadas, setBloqueadas] = useState([]); // geometrias descartadas por alagamento
     const [rotaAtual, setRotaAtual] = useState(null);
     const [listaAberta, setListaAberta] = useState(true);
     const [seguir, setSeguirState] = useState(true);
     const [progresso, setProgresso] = useState(null);
     const [chegou, setChegou] = useState(false);
+
+    // Câmera: '2d' (Visão Superior) → 'prep' (container cresce) → '3d' (Visão Imersiva) → 'saindo' → '2d'
+    const [camera, setCamera] = useState('2d');
+    const [dim3d, setDim3d] = useState(null); // { w, h } do container do mapa na visão 3D
 
     const setters = { origem: setOrigem, destino: setDestino };
 
@@ -456,9 +554,8 @@ export default function MapaABC() {
         setSeguirState(v);
     }
 
-    // Sai do modo "busca" quando há rota final e enquadra o mapa (sem mexer no zoom durante a navegação)
-    function entrarNoItinerario(coords) {
-        if (faseRef.current !== 'navegando') ajustarMapa(mapRef.current, coords);
+    function entrarNoItinerario(bounds) {
+        if (faseRef.current !== 'navegando' && bounds) ajustarMapa(mapRef.current, bounds);
         setFase((f) => (f === 'busca' ? 'itinerario' : f));
     }
 
@@ -474,33 +571,151 @@ export default function MapaABC() {
         });
     }
 
+    // Define a rota "ativa" (itinerário + navegação) a partir de uma candidata
+    function construirRotaAtual(c) {
+        const base = {
+            coordenadas: c.coordenadas, acumulada: c.acumulada, total: c.total,
+            tempo: c.tempo, passos: c.passos, trechos: null, simulado: false, carregando: false
+        };
+
+        if (modoRef.current === 'transit') {
+            const id = ++mistaReqRef.current;
+            setRotaAtual({ ...base, passos: [], carregando: true, simulado: true });
+            obterRotaTransportePublico({
+                origem: rotaRef.current?.inicio,
+                destino: rotaRef.current?.fim,
+                rotaViaria: base
+            })
+                .then((res) => {
+                    if (id !== mistaReqRef.current) return;
+                    publicarRotaMista(res, c.coordenadas);
+                })
+                .catch(() => {
+                    if (id !== mistaReqRef.current) return;
+                    setRotaAtual(null);
+                    setErroRota('Não foi possível montar a rota de transporte público.');
+                });
+        } else {
+            mistaReqRef.current++;
+            setRotaAtual(base);
+        }
+    }
+
+    // Seleciona uma das alternativas (clique no mapa ou no card) — só antes de iniciar a viagem
+    function selecionarRota(idx) {
+        const c = candidatasRef.current[idx];
+        if (!c || faseRef.current === 'navegando') return;
+        setSelecionada(idx);
+        construirRotaAtual(c);
+    }
+
+    // Recebe TODAS as rotas do OSRM, aplica o filtro de alagamento em cada uma
+    // (waypoint de fuga individual) e publica as candidatas válidas.
+    async function processarRotas(rotasOSRM) {
+        const reqId = ++calcReqRef.current;
+        const routing = routingRef.current;
+        const alvo = rotaRef.current;
+        if (!routing || !alvo) return;
+
+        const router = routing.getRouter?.() || routing._router;
+        const zonas = zonasRiscoRef.current;
+        const formatter = formatterRef.current;
+
+        const resolvidas = await Promise.all(
+            rotasOSRM.slice(0, MAX_ROTAS).map(async (rota) => {
+                const zona = encontrarColisao(rota.coordinates, zonas);
+                if (!zona) return { rota, desviada: false, bloqueada: false };
+
+                // Gatilho: waypoint de fuga silencioso força o OSRM a contornar a água nesta rota
+                const fuga = L.latLng(zona.lat + OFFSET_FUGA, zona.lng + OFFSET_FUGA);
+                try {
+                    const novas = await rotearViaRouter(router, [alvo.inicio, fuga, alvo.fim], { semAlternativas: true });
+                    const nova = novas?.[0];
+                    if (nova && !encontrarColisao(nova.coordinates, zonas)) {
+                        return { rota: nova, desviada: true, bloqueada: false };
+                    }
+                } catch (err) {
+                    console.warn('Falha ao recalcular o desvio:', err);
+                }
+                return { rota, desviada: true, bloqueada: true };
+            })
+        );
+
+        if (reqId !== calcReqRef.current) return; // chegou um pedido mais novo
+
+        const lista = [];
+        const geometriasBloqueadas = [];
+        const vistos = new Set();
+
+        for (const r of resolvidas) {
+            if (r.bloqueada) { geometriasBloqueadas.push(r.rota.coordinates); continue; }
+
+            const c = montarCandidata(r.rota, formatter, r.desviada);
+            if (!c.coordenadas.length) continue;
+
+            // Desvios podem convergir para o mesmo caminho: remove duplicatas
+            const meio = c.coordenadas[indiceNaDistancia(c.acumulada, c.total / 2)];
+            const assinatura = `${Math.round(c.total / 40)}|${meio.lat.toFixed(3)}|${meio.lng.toFixed(3)}`;
+            if (vistos.has(assinatura)) continue;
+            vistos.add(assinatura);
+            lista.push(c);
+        }
+
+        lista.sort((a, b) => a.tempo - b.tempo);
+        lista.forEach((c, i) => { c.id = `r-${i}`; });
+
+        candidatasRef.current = lista;
+        setCandidatas(lista);
+        setBloqueadas(geometriasBloqueadas);
+        setSelecionada(0);
+
+        // Todas as alternativas cruzam a água mesmo após o desvio → alerta vermelho
+        if (!lista.length) {
+            setRotaAtual(null);
+            setEmPerigo(true);
+            return;
+        }
+
+        setEmPerigo(false);
+        setErroRota('');
+        construirRotaAtual(lista[0]);
+
+        const bounds = lista.reduce(
+            (b, c) => b.extend(L.latLngBounds(c.coordenadas)),
+            L.latLngBounds(lista[0].coordenadas)
+        );
+        entrarNoItinerario(bounds);
+    }
+
     // ───── Inicialização do mapa, routing e zonas de risco ─────
     useEffect(() => {
         if (typeof window === 'undefined' || mapRef.current) return;
 
         let cancelado = false;
 
-        const map = L.map('mapa-container', { zoomControl: false }).setView(
+        // attributionControl desligado: o crédito do OSM fica no overlay (os controles do Leaflet
+        // ficam dentro do container que é inclinado na visão 3D)
+        const map = L.map('mapa-container', { zoomControl: false, attributionControl: false }).setView(
             [CENTRO_ABC.lat, CENTRO_ABC.lng], 13
         );
         L.control.zoom({ position: 'bottomright' }).addTo(map);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© OpenStreetMap contributors'
-        }).addTo(map);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
         mapRef.current = map;
 
-        // Camada própria (acima da linha do LRM) para os trechos da Rota Mista
-        map.createPane('mista');
-        map.getPane('mista').style.zIndex = 450;
+        // Panes próprios: alternativas < rota selecionada < trechos da Rota Mista
+        map.createPane('rotasAlt').style.zIndex = 410;
+        map.createPane('rotas').style.zIndex = 430;
+        map.createPane('mista').style.zIndex = 450;
 
         const camadaZonas = L.layerGroup().addTo(map);
         camadaMarcadoresRef.current = L.layerGroup().addTo(map);
+        camadaRotasRef.current = L.layerGroup().addTo(map);
+        camadaRotulosRef.current = L.layerGroup().addTo(map);
         camadaMistaRef.current = L.layerGroup().addTo(map);
 
-        // Gera o texto das instruções (as instruções cruas do LRM não trazem `text`)
         formatterRef.current = new L.Routing.Formatter({ language: 'pt' });
 
-        // Arrastar o mapa durante a navegação desliga o "seguir"
+        // Arrastar o mapa durante a navegação (visão superior) desliga o "seguir"
         map.on('dragstart', () => {
             if (seguirRef.current) {
                 seguirRef.current = false;
@@ -508,100 +723,59 @@ export default function MapaABC() {
             }
         });
 
+        const router = L.Routing.osrmv1({
+            serviceUrl: MODOS.driving.servico,
+            profile: 'driving',
+            useHints: false
+        });
+
+        // O LRM só pede `alternatives=true` (1 alternativa). Pedimos até MAX_ALTERNATIVAS.
+        // Desvios individuais usam { semAlternativas: true }.
+        const construirUrlOriginal = router.buildRouteUrl.bind(router);
+        router.buildRouteUrl = (wps, opts) => {
+            const url = construirUrlOriginal(wps, opts);
+            if (opts?.semAlternativas) return url.replace('alternatives=true', 'alternatives=false');
+            return altNumericoRef.current
+                ? url.replace('alternatives=true', `alternatives=${MAX_ALTERNATIVAS}`)
+                : url;
+        };
+
+        const estiloInvisivel = { styles: [{ color: '#000', opacity: 0, weight: 1 }] };
+
         const routing = L.Routing.control({
             waypoints: [],
-            router: L.Routing.osrmv1({
-                serviceUrl: MODOS.driving.servico,
-                profile: 'driving',
-                useHints: false
-            }),
+            router,
             language: 'pt',
-            show: false,                // interface nativa oculta
-            showAlternatives: false,
-            fitSelectedRoutes: false,   // o enquadramento é feito por ajustarMapa()
+            show: false,                  // interface nativa oculta
+            showAlternatives: true,       // o OSRM devolve as alternativas em e.routes
+            fitSelectedRoutes: false,
             routeWhileDragging: false,
             addWaypoints: false,
             draggableWaypoints: false,
-            lineOptions: { styles: [MODOS.driving.estilo] },
-            createMarker: () => null    // o waypoint de fuga permanece invisível
+            lineOptions: estiloInvisivel,
+            altLineOptions: estiloInvisivel,
+            // As linhas são desenhadas por nós (seleção clicável, rótulos, estilos por modo):
+            // o LRM recebe uma camada vazia no lugar da linha dele.
+            routeLine: (route) => {
+                const vazio = L.layerGroup();
+                vazio.getBounds = () => L.latLngBounds(route.coordinates);
+                return vazio;
+            },
+            createMarker: () => null      // o waypoint de fuga permanece invisível
         }).addTo(map);
         routingRef.current = routing;
 
         routing.on('routesfound', (e) => {
-            const rota = e.routes[0];
-            const zona = encontrarColisao(rota.coordinates, zonasRiscoRef.current);
-
-            // ── Rota limpa: monta o itinerário ──
-            if (!zona) {
-                setEmPerigo(false);
-                setErroRota('');
-
-                const coords = rota.coordinates;
-                const acumulada = acumularDistancias(coords);
-                const total = acumulada[acumulada.length - 1] || rota.summary.totalDistance;
-                const base = {
-                    coordenadas: coords, acumulada, total,
-                    tempo: rota.summary.totalTime,
-                    passos: [], trechos: null, simulado: false, carregando: false
-                };
-                const reqId = ++reqRef.current;
-
-                if (modoRef.current === 'transit') {
-                    // Placeholder enquanto a Rota Mista é montada (instantâneo na simulação; assíncrono com API real)
-                    setRotaAtual({ ...base, carregando: true, simulado: true });
-                    obterRotaTransportePublico({
-                        origem: rotaRef.current?.inicio,
-                        destino: rotaRef.current?.fim,
-                        rotaViaria: base
-                    })
-                        .then((res) => {
-                            if (reqId !== reqRef.current) return;
-                            publicarRotaMista(res, coords);
-                        })
-                        .catch(() => {
-                            if (reqId !== reqRef.current) return;
-                            setRotaAtual(null);
-                            setErroRota('Não foi possível montar a rota de transporte público.');
-                        });
-                } else {
-                    // Instruções passo a passo (sem o WaypointReached do ponto de fuga)
-                    const formatter = formatterRef.current;
-                    const instrucoes = (rota.instructions || []).filter((i) => i.type !== 'WaypointReached');
-                    base.passos = instrucoes.map((instr, k) => {
-                        let texto;
-                        try { texto = formatter.formatInstruction(instr, k); } catch { texto = null; }
-                        return {
-                            id: `m-${k}`,
-                            tipo: 'manobra',
-                            manobra: instr.type,
-                            texto: texto || instr.road || 'Continue',
-                            detalhe: instr.distance > 0 ? `por ${formatarDistancia(instr.distance)}` : '',
-                            indiceCoord: instr.index
-                        };
-                    });
-                    setRotaAtual(base);
-                }
-
-                entrarNoItinerario(coords);
-                return;
-            }
-
-            // ── 1ª colisão: waypoint de fuga silencioso → OSRM recalcula contornando a água ──
-            if (tentativaRef.current === 0 && rotaRef.current) {
-                tentativaRef.current = 1;
-                const { inicio, fim } = rotaRef.current;
-                const pontoFuga = L.latLng(zona.lat + OFFSET_FUGA, zona.lng + OFFSET_FUGA);
-                routing.setWaypoints([inicio, pontoFuga, fim]);
-                return;
-            }
-
-            // ── Recálculo também colidiu → alerta vermelho ──
-            reqRef.current++;
-            setRotaAtual(null);
-            setEmPerigo(true);
+            processarRotasRef.current?.(e.routes);
         });
 
         routing.on('routingerror', () => {
+            // Alguns servidores OSRM não aceitam alternatives=<número>: volta para alternatives=true
+            if (altNumericoRef.current) {
+                altNumericoRef.current = false;
+                routing.route();
+                return;
+            }
             setErroRota('Não foi possível calcular a rota. Tente novamente em instantes.');
         });
 
@@ -628,13 +802,21 @@ export default function MapaABC() {
             mapRef.current = null;
             routingRef.current = null;
             camadaMarcadoresRef.current = null;
+            camadaRotasRef.current = null;
+            camadaRotulosRef.current = null;
             camadaMistaRef.current = null;
             marcadorUsuarioRef.current = null;
             precisaoRef.current = null;
         };
     }, []);
 
-    // Limpeza geral ao desmontar: timers, buscas, GPS e wake lock
+    // Mantém as refs apontando para as funções mais recentes (usadas por eventos do Leaflet)
+    useEffect(() => {
+        processarRotasRef.current = processarRotas;
+        selecionarRotaRef.current = selecionarRota;
+    });
+
+    // Limpeza geral ao desmontar
     useEffect(() => {
         const timers = timersRef.current;
         const aborts = abortRef.current;
@@ -647,6 +829,110 @@ export default function MapaABC() {
             wakeLockRef.current?.release?.().catch(() => { });
         };
     }, []);
+
+    // ───── Câmera imersiva ─────
+
+    // O container mudou de tamanho (entrada/saída da visão 3D, rotação do aparelho): o Leaflet precisa recalcular.
+    // invalidateSize mantém o centro geográfico no centro do container.
+    useEffect(() => {
+        mapRef.current?.invalidateSize({ animate: false });
+    }, [dim3d]);
+
+    // Máquina de estados da câmera
+    useEffect(() => {
+        cameraImersivaRef.current = camera === '3d';
+        const pos = ultimaPosRef.current;
+        const recentrar = (animar) => {
+            if (pos && mapRef.current) centralizarCamera(L.latLng(pos.lat, pos.lng), animar);
+        };
+
+        if (camera === 'prep') {
+            // O container já cresceu (centro preservado); um instante depois liga o tilt,
+            // assim a transição de CSS parte de um estado já renderizado
+            const t = setTimeout(() => setCamera('3d'), 60);
+            return () => clearTimeout(t);
+        }
+
+        if (camera === '3d') {
+            atualizarGiro();
+            recentrar(true); // aplica o offset: marcador desce na tela
+            return undefined;
+        }
+
+        if (camera === 'saindo') {
+            recentrar(true); // volta a centralizar o marcador enquanto o ângulo desfaz
+            const t = setTimeout(() => {
+                setCamera('2d');
+                setDim3d(null);
+            }, DURACAO_TRANSICAO_MS + 60);
+            return () => clearTimeout(t);
+        }
+
+        return undefined;
+    }, [camera]);
+
+    // Redimensiona a cena 3D se a janela mudar (ex.: girar o celular)
+    useEffect(() => {
+        if (camera === '2d') return undefined;
+        const aoRedimensionar = () => {
+            const cena = cenaRef.current;
+            if (!cena) return;
+            setDim3d(dimensoesCena3D(cena.clientWidth, cena.clientHeight, ROTACIONAR_MAPA_NA_VISAO_3D));
+        };
+        window.addEventListener('resize', aoRedimensionar);
+        return () => window.removeEventListener('resize', aoRedimensionar);
+    }, [camera]);
+
+    // Segurança: saiu da navegação → volta para a visão superior
+    useEffect(() => {
+        if (fase !== 'navegando' && camera !== '2d') resetarCamera();
+    }, [fase, camera]);
+
+    function alternarCamera() {
+        if (camera === '2d') {
+            const cena = cenaRef.current;
+            if (!cena) return;
+            setDim3d(dimensoesCena3D(cena.clientWidth, cena.clientHeight, ROTACIONAR_MAPA_NA_VISAO_3D));
+            definirSeguir(true); // sem arrastar na visão 3D: a câmera sempre segue o motorista
+            setCamera('prep');
+        } else if (camera === '3d') {
+            setCamera('saindo');
+        }
+    }
+
+    function resetarCamera() {
+        cameraImersivaRef.current = false;
+        setCamera('2d');
+        setDim3d(null);
+    }
+
+    // Gira o plano do mapa para que a frente do motorista fique para cima (CSS var lida no transform)
+    function atualizarGiro() {
+        const giro = ROTACIONAR_MAPA_NA_VISAO_3D ? -anguloRef.current : 0;
+        rootRef.current?.style.setProperty('--mabc-giro', `${giro}deg`);
+    }
+
+    // Centraliza o mapa no motorista. Na visão imersiva aplica o offset em pixels:
+    // o centro do mapa vai para "à frente" do marcador, que desce na tela.
+    function centralizarCamera(ll, animar = true) {
+        const map = mapRef.current;
+        if (!map) return;
+
+        if (!cameraImersivaRef.current) {
+            map.setView(ll, Math.max(map.getZoom(), ZOOM_NAVEGACAO), { animate: animar, duration: 0.8 });
+            return;
+        }
+
+        const zoom = Math.max(map.getZoom(), ZOOM_IMERSIVO);
+        const alturaCena = cenaRef.current?.clientHeight || window.innerHeight;
+        const offset = offsetCameraPx(alturaCena);
+        const rad = ROTACIONAR_MAPA_NA_VISAO_3D ? (anguloRef.current * Math.PI) / 180 : 0;
+
+        // Direção da frente do motorista em pixels do mapa: (sen h, −cos h) — norte é −y
+        const p = map.project(ll, zoom);
+        const centro = map.unproject(L.point(p.x + Math.sin(rad) * offset, p.y - Math.cos(rad) * offset), zoom);
+        map.setView(centro, zoom, { animate: animar, duration: 0.8 });
+    }
 
     // ───── Marcadores de origem/destino ─────
     useEffect(() => {
@@ -665,7 +951,68 @@ export default function MapaABC() {
         }
     }, [origem.coord, destino.coord]);
 
-    // ───── Trechos da Rota Mista desenhados sobre o mapa ─────
+    // ───── Desenho das rotas: selecionada em destaque, alternativas clicáveis ─────
+    useEffect(() => {
+        const camada = camadaRotasRef.current;
+        const rotulos = camadaRotulosRef.current;
+        if (!camada || !rotulos) return;
+        camada.clearLayers();
+        rotulos.clearLayers();
+
+        const navegando = fase === 'navegando';
+        const estilo = MODOS[modo].estilo;
+
+        // Rotas descartadas por alagamento (apenas como contexto visual)
+        if (!navegando) {
+            bloqueadas.forEach((coords) => {
+                L.polyline(coords, {
+                    color: '#dc2626', weight: 4, opacity: 0.75, dashArray: '8, 8',
+                    pane: 'rotasAlt', interactive: false
+                }).addTo(camada);
+            });
+        }
+
+        candidatas.forEach((c, i) => {
+            const sel = i === selecionada;
+            if (navegando && !sel) return; // durante a viagem só a rota escolhida
+
+            if (sel) {
+                L.polyline(c.coordenadas, {
+                    color: '#fff', weight: estilo.weight + 5, opacity: 0.95, pane: 'rotas', interactive: false
+                }).addTo(camada);
+                L.polyline(c.coordenadas, { ...estilo, pane: 'rotas', interactive: false }).addTo(camada);
+            } else {
+                L.polyline(c.coordenadas, {
+                    color: '#94a3b8', weight: 7, opacity: 0.85, pane: 'rotasAlt', interactive: false
+                }).addTo(camada);
+                // Área de clique larga e quase invisível por cima da alternativa
+                L.polyline(c.coordenadas, {
+                    color: '#000', weight: 24, opacity: 0.01, pane: 'rotasAlt', bubblingMouseEvents: false
+                })
+                    .on('click', () => selecionarRotaRef.current?.(i))
+                    .addTo(camada);
+            }
+
+            // Rótulo clicável com o tempo de cada opção (estilo Google Maps)
+            if (!navegando && candidatas.length > 1) {
+                const frac = [0.5, 0.35, 0.65][i] ?? 0.5;
+                const ponto = c.coordenadas[indiceNaDistancia(c.acumulada, c.total * frac)];
+                const texto = modo === 'transit' ? `Opção ${i + 1}` : formatarTempo(c.tempo);
+                L.marker(ponto, {
+                    icon: L.divIcon({
+                        className: 'mabc-rotulo-rota',
+                        html: `<span class="${sel ? 'sel' : ''}">${texto}</span>`,
+                        iconSize: [0, 0]
+                    }),
+                    keyboard: false
+                })
+                    .on('click', () => selecionarRotaRef.current?.(i))
+                    .addTo(rotulos);
+            }
+        });
+    }, [candidatas, selecionada, bloqueadas, fase, modo]);
+
+    // ───── Trechos da Rota Mista desenhados sobre a rota selecionada ─────
     useEffect(() => {
         const camada = camadaMistaRef.current;
         if (!camada) return;
@@ -674,7 +1021,6 @@ export default function MapaABC() {
 
         let d = 0;
         rotaAtual.trechos.forEach((t) => {
-            // Com API real, cada trecho traz a própria geometria; na simulação fatiamos o corredor viário
             const pontos = t.coordenadas
                 || fatiarCoordenadas(rotaAtual.coordenadas, rotaAtual.acumulada, d, d + t.distanciaM);
             d += t.distanciaM;
@@ -752,8 +1098,6 @@ export default function MapaABC() {
         setErroRota('');
         setEmPerigo(false);
         setCampoAberto(null);
-
-        tentativaRef.current = 0;
         rotaRef.current = { inicio, fim };
 
         // [GTFS-2] Com API real, o OSRM não é usado no modo transporte público:
@@ -763,31 +1107,35 @@ export default function MapaABC() {
             return;
         }
 
+        // O controle busca as rotas e dispara 'routesfound' → processarRotas()
         routing.setWaypoints([inicio, fim]);
     }
 
     // [GTFS-2] Caminho 100% GTFS: sem OSRM, geometria vinda da API.
-    // Obs.: o desvio de alagamento (waypoint de fuga) não se aplica aqui, pois o trajeto é
-    // definido pela API; se quiser, valide os trechos a pé com encontrarColisao().
+    // O desvio de alagamento não se aplica aqui (o trajeto é definido pela API);
+    // se quiser, valide os trechos a pé com encontrarColisao().
     async function carregarRotaMistaReal(inicio, fim) {
-        const reqId = ++reqRef.current;
-        routingRef.current?.setWaypoints([]); // remove a linha do OSRM
-        setRotaAtual((r) => (r ? { ...r, carregando: true } : r));
+        const id = ++mistaReqRef.current;
+        calcReqRef.current++;
+        routingRef.current?.setWaypoints([]);
+        candidatasRef.current = [];
+        setCandidatas([]);
+        setBloqueadas([]);
 
         try {
             const res = await obterRotaTransportePublico({ origem: inicio, destino: fim, rotaViaria: null });
-            if (reqId !== reqRef.current) return;
+            if (id !== mistaReqRef.current) return;
 
             const coordenadas = [];
             res.trechos.forEach((t) => {
-                t.indiceInicio = coordenadas.length; // onde o trecho começa na polilinha única
+                t.indiceInicio = coordenadas.length;
                 coordenadas.push(...(t.coordenadas || []));
             });
 
             publicarRotaMista(res, coordenadas);
-            entrarNoItinerario(coordenadas);
+            entrarNoItinerario(L.latLngBounds(coordenadas));
         } catch (err) {
-            if (reqId !== reqRef.current) return;
+            if (id !== mistaReqRef.current) return;
             console.error(err);
             setRotaAtual(null);
             setErroRota('Não foi possível montar a rota de transporte público.');
@@ -833,10 +1181,15 @@ export default function MapaABC() {
 
     function limparRota() {
         pararGPS();
-        reqRef.current++;
+        resetarCamera();
+        calcReqRef.current++;
+        mistaReqRef.current++;
         routingRef.current?.setWaypoints([]);
         rotaRef.current = null;
-        tentativaRef.current = 0;
+        candidatasRef.current = [];
+        setCandidatas([]);
+        setBloqueadas([]);
+        setSelecionada(0);
         setOrigem({ texto: '', coord: null });
         setDestino({ texto: '', coord: null });
         setSugestoes({ origem: [], destino: [] });
@@ -875,7 +1228,7 @@ export default function MapaABC() {
     async function pedirWakeLock() {
         try {
             if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen');
-        } catch { /* opcional: ignora se o navegador negar */ }
+        } catch { /* opcional */ }
     }
 
     function soltarWakeLock() {
@@ -892,25 +1245,52 @@ export default function MapaABC() {
         precisaoRef.current?.remove();
         marcadorUsuarioRef.current = null;
         precisaoRef.current = null;
+        refRumoRef.current = null;
+        anguloRef.current = 0;
+        rootRef.current?.style.setProperty('--mabc-giro', '0deg');
         soltarWakeLock();
     }
 
-    function aoReceberPosicao(pos) {
-        const { latitude: lat, longitude: lng, accuracy } = pos.coords;
-        ultimaPosRef.current = { lat, lng };
+    // Rotaciona só o filho interno: o elemento raiz do marcador é posicionado pelo Leaflet via transform
+    function aplicarRumoNaSeta() {
+        const el = marcadorUsuarioRef.current?.getElement();
+        const rot = el?.querySelector('.mabc-seta-rot');
+        if (rot) rot.style.transform = `rotate(${anguloRef.current}deg)`;
+    }
 
+    function aoReceberPosicao(pos) {
+        const { latitude: lat, longitude: lng, accuracy, heading, speed } = pos.coords;
         const map = mapRef.current;
         if (!map) return;
-        const ll = L.latLng(lat, lng);
 
+        const ll = L.latLng(lat, lng);
+        ultimaPosRef.current = { lat, lng };
+
+        // Rumo: usa o `heading` do GPS quando é confiável; senão deduz pelo deslocamento
+        const anterior = refRumoRef.current;
+        const moveu = anterior ? anterior.distanceTo(ll) > 5 : false;
+        let rumo = null;
+        if (Number.isFinite(heading) && (speed == null || speed > 0.8)) rumo = heading;
+        else if (moveu) rumo = calcularRumo(anterior, ll);
+        if (!anterior || moveu) refRumoRef.current = ll;
+
+        if (rumo != null) {
+            // "Desenrola" o ângulo para a seta (e o giro do mapa) não darem a volta longa (359° → 1°)
+            const delta = ((((rumo - anguloRef.current + 540) % 360) + 360) % 360) - 180;
+            anguloRef.current += delta;
+        }
+
+        // Marcador em formato de seta + círculo de precisão
         if (!marcadorUsuarioRef.current) {
             marcadorUsuarioRef.current = L.marker(ll, {
                 icon: L.divIcon({
-                    className: 'mabc-gps',
-                    html: '<span class="mabc-gps-pulso"></span><span class="mabc-gps-ponto"></span>',
-                    iconSize: [28, 28], iconAnchor: [14, 14]
+                    className: 'mabc-seta',
+                    html:
+                        '<div class="mabc-seta-wrap"><span class="mabc-seta-pulso"></span>' +
+                        '<div class="mabc-seta-rot"><svg viewBox="0 0 24 24"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z" fill="#2563eb" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg></div></div>',
+                    iconSize: [44, 44], iconAnchor: [22, 22]
                 }),
-                interactive: false, zIndexOffset: 1000
+                interactive: false, keyboard: false, zIndexOffset: 1000
             }).addTo(map);
             precisaoRef.current = L.circle(ll, {
                 radius: accuracy, stroke: false, fillColor: '#3b82f6', fillOpacity: 0.12, interactive: false
@@ -919,9 +1299,11 @@ export default function MapaABC() {
             marcadorUsuarioRef.current.setLatLng(ll);
             precisaoRef.current.setLatLng(ll).setRadius(accuracy);
         }
+        aplicarRumoNaSeta();
+        atualizarGiro();
 
-        // Centraliza no usuário enquanto "seguir" estiver ligado
-        if (seguirRef.current) map.setView(ll, Math.max(map.getZoom(), 17), { animate: true });
+        // Mantém o motorista centralizado (com offset na visão imersiva) a cada atualização do GPS
+        if (seguirRef.current) centralizarCamera(ll);
 
         const prog = calcularProgresso(rotaAtualRef.current, lat, lng, accuracy);
         if (!prog) return;
@@ -945,6 +1327,7 @@ export default function MapaABC() {
         if (err.code === 1) encerrarNavegacao();
     }
 
+    // Botão "Ir Agora"
     function iniciarNavegacao() {
         const rota = rotaAtualRef.current;
         if (!rota || rota.carregando) return;
@@ -958,7 +1341,7 @@ export default function MapaABC() {
         setErroRota('');
         setChegou(false);
         setProgresso(null);
-        setListaAberta(false);
+        setListaAberta(true);   // só o painel de instruções fica visível
         definirSeguir(true);
         setFase('navegando');
         pedirWakeLock();
@@ -971,6 +1354,7 @@ export default function MapaABC() {
 
     function encerrarNavegacao() {
         pararGPS();
+        resetarCamera();
         setChegou(false);
         setProgresso(null);
         setListaAberta(true);
@@ -980,10 +1364,10 @@ export default function MapaABC() {
     function recentralizar() {
         definirSeguir(true);
         const pos = ultimaPosRef.current;
-        if (pos) mapRef.current?.setView([pos.lat, pos.lng], Math.max(mapRef.current.getZoom(), 17), { animate: true });
+        if (pos) centralizarCamera(L.latLng(pos.lat, pos.lng));
     }
 
-    // Fora da rota: recalcula a partir da posição atual (mantém o desvio de alagamentos)
+    // Fora da rota: recalcula a partir da posição atual (alternativas + desvio de alagamento de novo)
     function recalcularDaqui() {
         const pos = ultimaPosRef.current;
         const r = rotaRef.current;
@@ -996,6 +1380,16 @@ export default function MapaABC() {
     const cfgModo = MODOS[modo];
     const avisoModo = modo === 'transit' && !TRANSPORTE_PUBLICO_REAL ? cfgModo.aviso : null;
     const proximoPasso = progresso && rotaAtual ? rotaAtual.passos[progresso.idxProximo] : null;
+    const imersiva = camera === '3d' || camera === 'prep';
+
+    // Tamanho do container na visão 3D (centralizado na cena). Em 2D: sem estilo → "inset: 0" do CSS.
+    const estiloMapa = dim3d
+        ? {
+            left: '50%', top: '50%', right: 'auto', bottom: 'auto',
+            width: dim3d.w, height: dim3d.h,
+            marginLeft: -dim3d.w / 2, marginTop: -dim3d.h / 2
+        }
+        : undefined;
 
     function renderModos(comLimpar) {
         return (
@@ -1062,11 +1456,15 @@ export default function MapaABC() {
     }
 
     return (
-        <div className="mabc-root">
+        // A classe mabc-cam-{estado} liga/desliga o tilt via CSS; --mabc-giro (CSS var) é atualizada a cada GPS
+        <div ref={rootRef} className={`mabc-root mabc-cam-${camera}`}>
             <style>{CSS}</style>
 
-            {/* Camada 0: mapa (todos os panes/popups/controles do Leaflet ficam presos aqui dentro) */}
-            <div id="mapa-container" className="mabc-mapa" />
+            {/* Camada 0: cena (recorta o mapa inclinado) → container do mapa → névoa do horizonte */}
+            <div ref={cenaRef} className="mabc-cena">
+                <div id="mapa-container" className="mabc-mapa" style={estiloMapa} />
+                <div className="mabc-ceu" />
+            </div>
 
             {/* Camada 1000: overlay isolado; só os painéis recebem cliques */}
             <div className="mabc-overlay">
@@ -1095,7 +1493,7 @@ export default function MapaABC() {
 
                         {rotaAtual && (
                             <button type="button" className="mabc-btn-sec" onClick={() => setFase('itinerario')}>
-                                <Icone nome="list" size={18} /> Ver passos da rota
+                                <Icone nome="list" size={18} /> Ver rotas e passos
                             </button>
                         )}
 
@@ -1105,7 +1503,7 @@ export default function MapaABC() {
                     </div>
                 )}
 
-                {/* ───── Fase 2: itinerário (inputs ocultos) ───── */}
+                {/* ───── Fase 2: escolha da rota + itinerário (inputs ocultos) ───── */}
                 {fase === 'itinerario' && rotaAtual && (
                     <div className={`mabc-painel mabc-itin${listaAberta ? '' : ' recolhido'}`}>
                         <button
@@ -1122,7 +1520,7 @@ export default function MapaABC() {
                             </button>
                             <div className="mabc-itin-titulo">
                                 <span>{origem.texto || 'Origem'}</span>
-                                <span className="mabc-seta">→</span>
+                                <span className="mabc-seta-txt">→</span>
                                 <span>{destino.texto || 'Destino'}</span>
                             </div>
                             <button type="button" className="mabc-icone-btn" onClick={limparRota} aria-label="Limpar rota" title="Limpar">
@@ -1131,6 +1529,35 @@ export default function MapaABC() {
                         </div>
 
                         {renderModos(false)}
+
+                        {/* Opções de rota (também clicáveis no mapa) */}
+                        {candidatas.length > 1 && (
+                            <div className="mabc-opcoes" role="radiogroup" aria-label="Rotas disponíveis">
+                                {candidatas.map((c, i) => (
+                                    <button
+                                        key={c.id} type="button" role="radio"
+                                        aria-checked={i === selecionada}
+                                        className={`mabc-opcao${i === selecionada ? ' ativo' : ''}`}
+                                        onClick={() => selecionarRota(i)}
+                                    >
+                                        <span className="mabc-opcao-tempo">
+                                            {modo === 'transit' ? `Opção ${i + 1}` : formatarTempo(c.tempo)}
+                                        </span>
+                                        <span className="mabc-opcao-dist">{formatarDistancia(c.total)}</span>
+                                        {i === 0 && modo !== 'transit' && <span className="mabc-tag">Mais rápida</span>}
+                                        {c.desviada && <span className="mabc-tag desvio">Com desvio</span>}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+
+                        {bloqueadas.length > 0 && (
+                            <div className="mabc-aviso-zona">
+                                {bloqueadas.length === 1
+                                    ? '1 rota descartada: cruza zona de alagamento sem desvio possível.'
+                                    : `${bloqueadas.length} rotas descartadas: cruzam zona de alagamento sem desvio possível.`}
+                            </div>
+                        )}
 
                         <div className="mabc-resumo">
                             {rotaAtual.carregando ? (
@@ -1150,10 +1577,10 @@ export default function MapaABC() {
                         {erroRota && <div className="mabc-erro">{erroRota}</div>}
 
                         <button
-                            type="button" className="mabc-btn-prim"
+                            type="button" className="mabc-btn-ir"
                             onClick={iniciarNavegacao} disabled={rotaAtual.carregando}
                         >
-                            <Icone nome="navigation" size={18} /> Iniciar navegação
+                            <Icone nome="navigation" size={22} /> Ir Agora
                         </button>
 
                         {listaAberta && (
@@ -1162,7 +1589,7 @@ export default function MapaABC() {
                     </div>
                 )}
 
-                {/* ───── Fase 3: navegação com GPS ───── */}
+                {/* ───── Fase 3: navegação (só o painel de instruções) ───── */}
                 {fase === 'navegando' && rotaAtual && (
                     <div className="mabc-painel mabc-nav">
                         {chegou ? (
@@ -1205,13 +1632,13 @@ export default function MapaABC() {
                         {erroRota && <div className="mabc-erro">{erroRota}</div>}
 
                         <div className="mabc-nav-acoes">
-                            {!seguir && (
+                            {!seguir && camera === '2d' && (
                                 <button type="button" className="mabc-btn-sec" onClick={recentralizar}>
                                     <Icone nome="locate" size={18} /> Recentralizar
                                 </button>
                             )}
                             <button type="button" className="mabc-btn-sec" onClick={() => setListaAberta((v) => !v)}>
-                                <Icone nome="list" size={18} /> Passos
+                                <Icone nome="list" size={18} /> {listaAberta ? 'Ocultar passos' : 'Passos'}
                             </button>
                             <button type="button" className="mabc-btn-enc" onClick={encerrarNavegacao}>
                                 {chegou ? 'Concluir' : 'Encerrar'}
@@ -1227,13 +1654,38 @@ export default function MapaABC() {
                     </div>
                 )}
 
-                {/* Alerta vermelho flutuante: o desvio também falhou */}
+                {/* Botão flutuante: Visão Superior (2D) ⇄ Visão Imersiva (3D) — só na navegação ativa */}
+                {fase === 'navegando' && (
+                    <button
+                        type="button"
+                        className={`mabc-btn-camera${imersiva ? ' ativo' : ''}`}
+                        onClick={alternarCamera}
+                        disabled={camera === 'prep' || camera === 'saindo'}
+                        aria-pressed={imersiva}
+                        aria-label={imersiva ? 'Voltar para a Visão Superior' : 'Ativar a Visão Imersiva'}
+                        title={imersiva ? 'Visão Superior' : 'Visão Imersiva'}
+                    >
+                        <Icone nome="compass" size={24} />
+                        <span>{imersiva ? '2D' : '3D'}</span>
+                    </button>
+                )}
+
+                {/* Alerta vermelho flutuante: nenhuma alternativa escapa da água */}
                 {emPerigo && (
                     <div className="mabc-alerta" role="alert">
                         <Icone nome="warning" size={22} />
                         <span><strong>ALERTA:</strong> A área está bloqueada e não há desvios seguros.</span>
                     </div>
                 )}
+
+                {/* Crédito obrigatório do OpenStreetMap (fora do container inclinado) */}
+                <a
+                    className="mabc-atribuicao"
+                    href="https://www.openstreetmap.org/copyright"
+                    target="_blank" rel="noopener noreferrer"
+                >
+                    © OpenStreetMap contributors
+                </a>
             </div>
         </div>
     );
@@ -1241,17 +1693,69 @@ export default function MapaABC() {
 
 // ───────────────────────── CSS ─────────────────────────
 const CSS = `
-/* Pilha de camadas: mapa (0) → overlay (1000). Nada do Leaflet escapa do contexto do mapa. */
+/* Pilha de camadas: cena (0) → overlay (1000). Nada do Leaflet escapa do contexto da cena. */
 .mabc-root {
     position: relative; isolation: isolate; width: 100%;
     height: 100vh; height: 100dvh; overflow: hidden; background: #e5e7eb;
     font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #0f172a;
+    --mabc-giro: 0deg;
 }
-.mabc-mapa { position: absolute; inset: 0; z-index: 0; }
 .mabc-overlay { position: absolute; inset: 0; z-index: 1000; pointer-events: none; }
 .mabc-overlay > * { pointer-events: auto; }
 .leaflet-routing-container { display: none !important; }
 .leaflet-routing-add-waypoint { display: none !important; }
+
+/* ── Cena + câmera ──
+   O tilt vai no CONTAINER do mapa, não no .leaflet-map-pane: o Leaflet escreve
+   transform: translate3d(...) inline no pane a cada pan e quebraria. */
+.mabc-cena {
+    position: absolute; inset: 0; z-index: 0; overflow: hidden;
+    background: linear-gradient(#cfe0f3, #e6eef8); /* "céu" visível além do horizonte */
+}
+.mabc-mapa {
+    position: absolute; inset: 0; z-index: 0; transform-origin: 50% 50%;
+    /* estado base com as MESMAS funções do estado inclinado → a transition interpola suavemente */
+    transform: perspective(${PERSPECTIVA_PX}px) rotateX(0deg) rotateZ(0deg);
+    transition: transform ${DURACAO_TRANSICAO_MS}ms cubic-bezier(.4, 0, .2, 1);
+    will-change: transform;
+}
+.mabc-cam-3d .mabc-mapa {
+    transform: perspective(${PERSPECTIVA_PX}px) rotateX(${INCLINACAO_GRAUS}deg) rotateZ(var(--mabc-giro, 0deg));
+}
+/* Com o plano inclinado o hit-testing do Leaflet (getBoundingClientRect) deixa de valer: sem interação com o mapa */
+.mabc-cam-prep .mabc-mapa, .mabc-cam-3d .mabc-mapa, .mabc-cam-saindo .mabc-mapa { pointer-events: none; }
+.mabc-cam-prep .leaflet-control-container, .mabc-cam-3d .leaflet-control-container, .mabc-cam-saindo .leaflet-control-container { display: none; }
+.mabc-root .leaflet-bottom { margin-bottom: 22px; } /* abre espaço para o crédito do OSM */
+
+/* Névoa do horizonte: esconde a borda distante do mapa na visão imersiva */
+.mabc-ceu {
+    position: absolute; left: 0; right: 0; top: 0; height: 42%; z-index: 2; pointer-events: none; opacity: 0;
+    transition: opacity ${DURACAO_TRANSICAO_MS}ms ease;
+    background: linear-gradient(to bottom,
+        rgba(214, 228, 243, 1) 0%, rgba(214, 228, 243, .9) 25%,
+        rgba(214, 228, 243, .5) 55%, rgba(214, 228, 243, 0) 100%);
+}
+.mabc-cam-3d .mabc-ceu { opacity: 1; }
+
+/* Botão flutuante 2D/3D */
+.mabc-btn-camera {
+    position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px;
+    width: 58px; height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border: none; border-radius: 50%; cursor: pointer; font: 800 11px system-ui, sans-serif; letter-spacing: .04em;
+    color: #334155; background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.28);
+    transition: background .15s, color .15s, transform .12s;
+}
+.mabc-btn-camera.ativo { color: #fff; background: #1d4ed8; }
+.mabc-btn-camera:active { transform: scale(.94); }
+.mabc-btn-camera:disabled { opacity: .75; cursor: default; }
+
+/* Crédito do OSM */
+.mabc-atribuicao {
+    position: absolute; right: 8px; bottom: calc(4px + env(safe-area-inset-bottom, 0px));
+    padding: 2px 8px; font-size: 11px; color: #475569; text-decoration: none;
+    background: rgba(255, 255, 255, 0.82); border-radius: 6px;
+}
 
 /* Painel base (glassmorphism) */
 .mabc-painel {
@@ -1281,19 +1785,29 @@ const CSS = `
     border: none; border-radius: 50%; background: transparent; color: #64748b; cursor: pointer; transition: background .15s;
 }
 .mabc-icone-btn:hover { background: #f1f5f9; }
-.mabc-btn-prim, .mabc-btn-sec, .mabc-btn-enc {
+.mabc-btn-sec, .mabc-btn-enc {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     height: 44px; padding: 0 16px; border: none; border-radius: 12px; cursor: pointer;
     font: inherit; font-size: 15px; font-weight: 600; transition: filter .15s, background .15s;
 }
-.mabc-btn-prim { width: 100%; margin-top: 10px; background: #2563eb; color: #fff; }
-.mabc-btn-prim:hover { filter: brightness(1.08); }
-.mabc-btn-prim:disabled { background: #94a3b8; cursor: default; }
 .mabc-btn-sec { background: #f1f5f9; color: #334155; }
 .mabc-btn-sec:hover { background: #e2e8f0; }
 .mabc-btn-enc { background: #fee2e2; color: #b91c1c; margin-left: auto; }
 .mabc-btn-enc:hover { background: #fecaca; }
 .mabc-painel > .mabc-btn-sec { width: 100%; margin-top: 10px; }
+
+/* Botão de destaque "Ir Agora" */
+.mabc-btn-ir {
+    display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
+    height: 54px; margin-top: 10px; border: none; border-radius: 16px; cursor: pointer;
+    font: inherit; font-size: 18px; font-weight: 800; letter-spacing: .01em; color: #fff;
+    background: linear-gradient(135deg, #22c55e, #15803d);
+    box-shadow: 0 8px 20px rgba(21, 128, 61, 0.38);
+    transition: transform .12s, filter .15s;
+}
+.mabc-btn-ir:hover { filter: brightness(1.07); }
+.mabc-btn-ir:active { transform: scale(.98); }
+.mabc-btn-ir:disabled { background: #94a3b8; box-shadow: none; cursor: default; }
 
 /* Inputs */
 .mabc-campos { display: flex; align-items: center; gap: 8px; }
@@ -1317,7 +1831,7 @@ const CSS = `
 .mabc-input.definido { background: #f0fdf4; border-color: #bbf7d0; }
 .mabc-input.definido:focus { background: #fff; border-color: #3b82f6; }
 
-/* Dropdown de sugestões (dentro do overlay: sempre acima do mapa) */
+/* Dropdown de sugestões */
 .mabc-dropdown {
     position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 10;
     margin: 0; padding: 6px; list-style: none; max-height: 300px; overflow-y: auto;
@@ -1337,19 +1851,43 @@ const CSS = `
 
 /* Avisos */
 .mabc-aviso { margin-top: 10px; padding: 8px 10px; font-size: 12.5px; line-height: 1.4; color: #5b21b6; background: #f5f3ff; border-radius: 10px; }
+.mabc-aviso-zona { margin-top: 10px; padding: 8px 10px; font-size: 12.5px; line-height: 1.4; color: #991b1b; background: #fee2e2; border-radius: 10px; }
 .mabc-erro { margin-top: 10px; padding: 8px 10px; font-size: 13px; color: #92400e; background: #fef3c7; border-radius: 10px; }
 .mabc-dica { margin-top: 10px; font-size: 12px; color: #94a3b8; text-align: center; }
 .mabc-dica kbd { padding: 1px 6px; font-family: inherit; font-size: 11px; color: #475569; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 5px; }
 .mabc-selo { padding: 2px 8px; font-size: 11px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; color: #92400e; background: #fef3c7; border-radius: 999px; }
+
+/* Opções de rota */
+.mabc-opcoes { display: flex; gap: 8px; margin-top: 10px; overflow-x: auto; padding-bottom: 2px; }
+.mabc-opcao {
+    flex: 1 0 auto; min-width: 104px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 8px 12px; text-align: left; font: inherit; color: #334155; background: #f8fafc;
+    border: 2px solid transparent; border-radius: 12px; cursor: pointer; transition: background .15s, border-color .15s;
+}
+.mabc-opcao:hover { background: #f1f5f9; }
+.mabc-opcao.ativo { background: #eff6ff; border-color: #2563eb; }
+.mabc-opcao-tempo { font-size: 16px; font-weight: 700; color: #0f172a; }
+.mabc-opcao-dist { font-size: 12.5px; color: #64748b; }
+.mabc-tag { margin-top: 2px; padding: 1px 7px; font-size: 10.5px; font-weight: 700; color: #166534; background: #dcfce7; border-radius: 999px; }
+.mabc-tag.desvio { color: #92400e; background: #fef3c7; }
+
+/* Rótulos de tempo sobre as rotas no mapa */
+.mabc-rotulo-rota { background: none; border: none; }
+.mabc-rotulo-rota span {
+    position: absolute; transform: translate(-50%, -50%); white-space: nowrap; cursor: pointer;
+    padding: 4px 10px; font: 700 13px system-ui, sans-serif; color: #475569; background: #fff;
+    border-radius: 999px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.3);
+}
+.mabc-rotulo-rota span.sel { color: #fff; background: #2563eb; }
 
 /* Itinerário */
 .mabc-alca { display: none; align-self: center; width: 100%; padding: 0 0 8px; border: none; background: none; cursor: pointer; justify-content: center; }
 .mabc-alca span { width: 40px; height: 4px; border-radius: 4px; background: #cbd5e1; }
 .mabc-itin-topo { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
 .mabc-itin-titulo { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; }
-.mabc-itin-titulo span:not(.mabc-seta) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mabc-seta { color: #94a3b8; flex-shrink: 0; }
-.mabc-resumo { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; padding: 10px 12px; background: #f8fafc; border-radius: 12px; }
+.mabc-itin-titulo span:not(.mabc-seta-txt) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mabc-seta-txt { color: #94a3b8; flex-shrink: 0; }
+.mabc-resumo { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 10px 12px; background: #f8fafc; border-radius: 12px; }
 .mabc-resumo-tempo { font-size: 22px; font-weight: 700; }
 .mabc-resumo-dist { font-size: 14px; color: #64748b; }
 .mabc-carregando { margin-top: 12px; font-size: 14px; color: #64748b; text-align: center; }
@@ -1366,6 +1904,7 @@ const CSS = `
 .mabc-passo-detalhe { font-size: 12.5px; color: #64748b; }
 
 /* Navegação */
+.mabc-nav { width: min(390px, calc(100% - 104px)); } /* deixa espaço para o botão 2D/3D */
 .mabc-nav-banner { display: flex; align-items: center; gap: 14px; padding: 12px; color: #fff; background: #1d4ed8; border-radius: 14px; }
 .mabc-nav-banner.chegou { background: #15803d; }
 .mabc-nav-icone { width: 48px; height: 48px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.18); border-radius: 12px; }
@@ -1386,22 +1925,26 @@ const CSS = `
     border: 2px solid #ef4444; border-radius: 14px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
 
-/* Marcador GPS */
-.mabc-gps { background: none; border: none; }
-.mabc-gps-pulso { position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%; background: rgba(37, 99, 235, 0.35); animation: mabc-pulso 1.8s ease-out infinite; }
-.mabc-gps-ponto { position: absolute; left: 6px; top: 6px; width: 16px; height: 16px; box-sizing: border-box; border-radius: 50%; background: #2563eb; border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4); }
-@keyframes mabc-pulso { 0% { transform: scale(.5); opacity: .9; } 100% { transform: scale(1.6); opacity: 0; } }
+/* Seta direcional do motorista (o Leaflet posiciona a raiz; giramos só o filho .mabc-seta-rot) */
+.mabc-seta { background: none; border: none; }
+.mabc-seta-wrap { position: relative; width: 44px; height: 44px; }
+.mabc-seta-pulso { position: absolute; inset: 6px; border-radius: 50%; background: rgba(37, 99, 235, 0.3); animation: mabc-pulso 1.8s ease-out infinite; }
+.mabc-seta-rot { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; transition: transform .35s ease-out; will-change: transform; }
+.mabc-seta-rot svg { width: 36px; height: 36px; filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45)); }
+@keyframes mabc-pulso { 0% { transform: scale(.6); opacity: .9; } 100% { transform: scale(1.7); opacity: 0; } }
 
-/* Mobile: painel de busca/navegação no topo, itinerário como "bottom sheet" */
+/* Mobile: busca/navegação no topo, itinerário como "bottom sheet" */
 @media (max-width: 640px) {
     .mabc-painel { left: 8px; right: 8px; width: auto; top: calc(8px + env(safe-area-inset-top, 0px)); border-radius: 18px; }
+    .mabc-nav { width: auto; max-height: calc(100% - 120px); }
     .mabc-itin {
-        top: auto; bottom: calc(26px + env(safe-area-inset-bottom, 0px)); /* deixa a atribuição do OSM visível */
-        max-height: 55%; border-radius: 22px;
+        top: auto; bottom: calc(26px + env(safe-area-inset-bottom, 0px)); /* deixa o crédito do OSM visível */
+        max-height: 58%; border-radius: 22px;
     }
     .mabc-alca { display: flex; }
-    .mabc-nav { max-height: calc(100% - 120px); }
     .mabc-nav .mabc-passos { max-height: 30vh; }
+    /* O botão 2D/3D sai do topo (ocupado pelo painel) e vai para o canto inferior direito */
+    .mabc-btn-camera { top: auto; right: 12px; bottom: calc(44px + env(safe-area-inset-bottom, 0px)); }
     .leaflet-control-zoom { display: none; } /* no celular, zoom por gesto de pinça */
 }
 `;
