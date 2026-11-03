@@ -20,14 +20,25 @@ const MAX_ROTAS = 3;
 const RAIO_CHEGADA_M = 30;
 const LIMITE_FORA_ROTA_M = 60;
 
+// ── GPS: snap-to-route e filtro de sensibilidade ──
+const LIMITE_SNAP_M = 35;           // distância máxima da rota para "colar" o marcador na linha
+const LIMIAR_DESLOCAMENTO_M = 3;    // abaixo disso a posição é ruído e não atualiza mapa/marcador
+const LIMIAR_ANGULO_GRAUS = 10;     // variação mínima para girar o ícone
+
 // ── Câmera imersiva (perspectiva simulada via CSS) ──
 const PERSPECTIVA_PX = 1000;              // perspective(1000px)
 const INCLINACAO_GRAUS = 55;              // rotateX(55deg)
 const MARCADOR_ALTURA_TELA = 0.75;        // onde o marcador aparece na visão 3D (0 = topo, 1 = base)
-const ROTACIONAR_MAPA_NA_VISAO_3D = true; // true: "heading-up" (frente do motorista sempre para cima)
-const ZOOM_NAVEGACAO = 17;                // zoom mínimo na visão superior
+const ROTACIONAR_MAPA_NA_VISAO_3D = true; // true: "heading-up"
+const ZOOM_NAVEGACAO = 17;                // zoom mínimo no 1º fix da visão superior
 const ZOOM_IMERSIVO = 18;                 // zoom mínimo na visão imersiva
-const DURACAO_TRANSICAO_MS = 800;         // suavidade da mudança de ângulo
+const DURACAO_TRANSICAO_MS = 800;
+
+// ── Paleta: azul marinho + azul claro ──
+const COR_MARINHO = '#0b2545';
+const COR_MARINHO_2 = '#134074';
+const COR_AZUL = '#3d8bd9';
+const COR_AZUL_CLARO = '#8fc3f5';
 
 // Interruptor da integração GTFS (veja [GTFS-1] e [GTFS-2]).
 const TRANSPORTE_PUBLICO_REAL = false;
@@ -38,7 +49,7 @@ const MODOS = {
     driving: {
         rotulo: 'Carro', icone: 'car',
         servico: 'https://routing.openstreetmap.de/routed-car/route/v1',
-        estilo: { color: '#2563eb', weight: 6, opacity: 0.95 }
+        estilo: { color: COR_MARINHO_2, weight: 6, opacity: 0.95 }
     },
     foot: {
         rotulo: 'A pé', icone: 'walk',
@@ -62,9 +73,9 @@ const MODOS = {
 const ESTILOS_TRECHO = {
     caminhada: { color: '#16a34a', weight: 6, opacity: 0.95, dashArray: '1, 12', lineCap: 'round' },
     onibus: { color: '#7c3aed', weight: 7, opacity: 0.95 },
-    trem: { color: '#0ea5e9', weight: 7, opacity: 0.95 }
+    trem: { color: COR_AZUL, weight: 7, opacity: 0.95 }
 };
-const CORES_TRECHO = { caminhada: '#16a34a', onibus: '#7c3aed', trem: '#0ea5e9', chegada: '#dc2626' };
+const CORES_TRECHO = { caminhada: '#16a34a', onibus: '#7c3aed', trem: COR_AZUL, chegada: '#dc2626' };
 
 // ───────────────────────── Ícones (SVG inline) ─────────────────────────
 const ICONES = {
@@ -98,8 +109,8 @@ function Icone({ nome, size = 20, rotacao = 0 }) {
 
 // ───────────────────────── Utilitários geométricos ─────────────────────────
 
-// Distância (m) de um ponto a um segmento, em projeção plana local.
-function distanciaPontoSegmentoM(p, a, b) {
+// Projeta o ponto p no segmento a→b (plano local). Retorna a distância (m) e a fração t ∈ [0,1].
+function projetarNoSegmento(p, a, b) {
     const kLat = 111320;
     const kLng = 111320 * Math.cos((p.lat * Math.PI) / 180);
     const ax = (a.lng - p.lng) * kLng;
@@ -111,7 +122,11 @@ function distanciaPontoSegmentoM(p, a, b) {
     const len2 = dx * dx + dy * dy;
     let t = len2 ? -(ax * dx + ay * dy) / len2 : 0;
     t = Math.max(0, Math.min(1, t));
-    return Math.hypot(ax + t * dx, ay + t * dy);
+    return { distanciaM: Math.hypot(ax + t * dx, ay + t * dy), t };
+}
+
+function distanciaPontoSegmentoM(p, a, b) {
+    return projetarNoSegmento(p, a, b).distanciaM;
 }
 
 // Primeira zona de risco atravessada pela rota (ou null). Independe do modo de transporte.
@@ -163,6 +178,11 @@ function calcularRumo(a, b) {
     return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
+// Diferença angular absoluta (0–180°), tolerante a ângulos "desenrolados" (>360)
+function difAngular(a, b) {
+    return Math.abs((((a - b + 540) % 360) + 360) % 360 - 180);
+}
+
 // Decodifica polylines codificadas (OTP e Google usam precisão 5).
 function decodificarPolyline(str, precisao = 5) {
     const fator = 10 ** precisao;
@@ -185,24 +205,53 @@ function decodificarPolyline(str, precisao = 5) {
     return out;
 }
 
-// Posição do usuário em relação à rota selecionada
-function calcularProgresso(rota, lat, lng, precisao = 0) {
-    const c = rota?.coordenadas;
-    if (!c || c.length < 2 || !rota.passos.length) return null;
+// ── SNAP-TO-ROUTE ──
+// Acha o segmento da rota mais próximo da coordenada crua e devolve o ponto projetado sobre a linha.
+// Usa uma janela em torno do último segmento (progresso monotônico): evita "pular" para outro trecho
+// quando a rota passa duas vezes pelo mesmo lugar. Se perder a rota na janela, busca na rota toda.
+function projetarNaRota(coords, lat, lng, indiceHint) {
+    const n = coords.length;
+    if (n < 2) return null;
 
     const p = { lat, lng };
-    let melhor = Infinity;
-    let idx = 0;
-    for (let i = 0; i < c.length - 1; i++) {
-        const d = distanciaPontoSegmentoM(p, c[i], c[i + 1]);
-        if (d < melhor) { melhor = d; idx = i; }
-    }
+    const buscar = (ini, fim) => {
+        let melhor = Infinity;
+        let idx = ini;
+        let t = 0;
+        for (let i = ini; i < fim; i++) {
+            const r = projetarNoSegmento(p, coords[i], coords[i + 1]);
+            if (r.distanciaM < melhor) { melhor = r.distanciaM; idx = i; t = r.t; }
+        }
+        return { melhor, idx, t };
+    };
 
-    const percorrido = rota.acumulada[idx];
+    let r = null;
+    if (indiceHint != null) {
+        r = buscar(Math.max(0, indiceHint - 10), Math.min(n - 1, indiceHint + 300));
+        if (r.melhor > LIMITE_FORA_ROTA_M) r = null;
+    }
+    if (!r) r = buscar(0, n - 1);
+
+    const a = coords[r.idx];
+    const b = coords[r.idx + 1];
+    return {
+        idx: r.idx,
+        t: r.t,
+        ponto: L.latLng(a.lat + (b.lat - a.lat) * r.t, a.lng + (b.lng - a.lng) * r.t),
+        desvioM: r.melhor,
+        rumoSegmento: calcularRumo(a, b)
+    };
+}
+
+// Progresso na rota a partir da projeção (já colada ou não)
+function calcularProgresso(rota, proj, precisao = 0) {
+    if (!rota || !proj || !rota.passos.length) return null;
+
+    const percorrido = rota.acumulada[proj.idx] + rota.coordenadas[proj.idx].distanceTo(proj.ponto);
     const restanteM = Math.max(0, rota.total - percorrido);
     const restanteS = rota.total ? rota.tempo * (restanteM / rota.total) : 0;
 
-    let idxProximo = rota.passos.findIndex((s) => s.indiceCoord > idx);
+    let idxProximo = rota.passos.findIndex((s) => s.indiceCoord > proj.idx);
     if (idxProximo === -1) idxProximo = rota.passos.length - 1;
     const alvo = rota.passos[idxProximo];
     const distProximo = Math.max(
@@ -212,20 +261,17 @@ function calcularProgresso(rota, lat, lng, precisao = 0) {
 
     return {
         idxProximo, distProximo, restanteM, restanteS,
-        desvioM: melhor,
-        foraDaRota: melhor > Math.max(LIMITE_FORA_ROTA_M, precisao * 1.5)
+        desvioM: proj.desvioM,
+        foraDaRota: proj.desvioM > Math.max(LIMITE_FORA_ROTA_M, precisao * 1.5)
     };
 }
 
 // ───────────────────────── Câmera imersiva: matemática ─────────────────────────
 
 // Tamanho (px) que o container do mapa precisa ter para preencher a cena depois do tilt.
-// Com rotateX(55deg) a parte distante do plano é muito comprimida: o mapa precisa ser bem maior
-// que a tela. Com rotação (heading-up), o container vira um quadrado que cobre a área visível
-// em qualquer direção.
 function dimensoesCena3D(largura, altura, comRotacao) {
     const sen = Math.sin((INCLINACAO_GRAUS * Math.PI) / 180);
-    const yLonge = Math.min(900, Math.max(600, altura * 0.95)); // alcance à frente, no plano do mapa
+    const yLonge = Math.min(900, Math.max(600, altura * 0.95));
     const meiaLarguraLonge = (largura / 2) * (1 + (yLonge * sen) / PERSPECTIVA_PX);
 
     if (!comRotacao) {
@@ -236,14 +282,93 @@ function dimensoesCena3D(largura, altura, comRotacao) {
     return { w: raio * 2, h: raio * 2 };
 }
 
-// Deslocamento (px, no plano do mapa) do centro do mapa em relação ao marcador, para que o
-// marcador apareça em MARCADOR_ALTURA_TELA da altura da tela. Inverte a projeção em perspectiva:
-//   yTela = o·cosθ · P / (P − o·senθ)   →   o = yTela·P / (P·cosθ + yTela·senθ)
+// Deslocamento (px) do centro do mapa em relação ao marcador para que ele apareça em
+// MARCADOR_ALTURA_TELA da altura da tela (inverte a projeção em perspectiva).
 function offsetCameraPx(alturaCena) {
     const P = PERSPECTIVA_PX;
     const th = (INCLINACAO_GRAUS * Math.PI) / 180;
-    const yTela = (MARCADOR_ALTURA_TELA - 0.5) * alturaCena; // px abaixo do centro da tela
+    const yTela = (MARCADOR_ALTURA_TELA - 0.5) * alturaCena;
     return (yTela * P) / (P * Math.cos(th) + yTela * Math.sin(th));
+}
+
+// ───────────────────────── Instruções em português ─────────────────────────
+// O texto vem de um gerador próprio em PT-BR: não depende de a localização do LRM existir/estar completa.
+
+const DIRECOES_PT = { N: 'norte', NE: 'nordeste', E: 'leste', SE: 'sudeste', S: 'sul', SW: 'sudoeste', W: 'oeste', NW: 'noroeste' };
+
+const VIAS_FEMININAS = [
+    'rua', 'avenida', 'alameda', 'estrada', 'rodovia', 'travessa', 'via', 'praça', 'ladeira', 'marginal',
+    'ponte', 'passarela', 'vila', 'viela', 'servidão', 'rotatória', 'transversal', 'ligação', 'passagem',
+    'galeria', 'r.', 'av.', 'rod.', 'al.', 'estr.', 'tv.', 'pça.', 'pç.'
+];
+const VIAS_MASCULINAS = [
+    'viaduto', 'largo', 'túnel', 'anel', 'corredor', 'beco', 'elevado', 'eixo', 'trevo', 'contorno',
+    'parque', 'pátio', 'rodoanel', 'acesso', 'caminho', 'complexo', 'boulevard'
+];
+
+function generoDaVia(nome) {
+    const primeira = nome.trim().split(/\s+/)[0].toLowerCase();
+    if (VIAS_FEMININAS.includes(primeira)) return 'f';
+    if (VIAS_MASCULINAS.includes(primeira)) return 'm';
+    return null; // desconhecido → usa "em"/"por", que servem para qualquer gênero
+}
+
+function emVia(nome) {
+    const g = generoDaVia(nome);
+    return g === 'f' ? `na ${nome}` : g === 'm' ? `no ${nome}` : `em ${nome}`;
+}
+
+function porVia(nome) {
+    const g = generoDaVia(nome);
+    return g === 'f' ? `pela ${nome}` : g === 'm' ? `pelo ${nome}` : `por ${nome}`;
+}
+
+// Tipos do LRM: Head, Continue, Straight, SlightRight, Right, SharpRight, Uturn/TurnAround, SharpLeft,
+// Left, SlightLeft, Roundabout, Merge, Fork, OnRamp, OffRamp, EndOfRoad, WaypointReached, DestinationReached
+function textoInstrucaoPt(instr) {
+    const rua = (instr.road || '').trim();
+    const tipo = instr.type;
+    const mod = instr.modifier || tipo || '';
+    const lado = /Left/i.test(mod) ? 'esquerda' : /Right/i.test(mod) ? 'direita' : null;
+    const em = rua ? ` ${emVia(rua)}` : '';
+    const por = rua ? ` ${porVia(rua)}` : '';
+
+    switch (tipo) {
+        case 'Head': {
+            const dir = DIRECOES_PT[instr.direction];
+            return `Siga${dir ? ` para o ${dir}` : ''}${por}`;
+        }
+        case 'Continue':
+        case 'Straight': return `Continue em frente${por}`;
+        case 'SlightRight': return `Vire levemente à direita${em}`;
+        case 'Right': return `Vire à direita${em}`;
+        case 'SharpRight': return `Faça uma curva fechada à direita${em}`;
+        case 'SlightLeft': return `Vire levemente à esquerda${em}`;
+        case 'Left': return `Vire à esquerda${em}`;
+        case 'SharpLeft': return `Faça uma curva fechada à esquerda${em}`;
+        case 'TurnAround':
+        case 'Uturn': return `Faça o retorno${em}`;
+        case 'Roundabout': {
+            const saida = instr.exit ? `pegue a ${instr.exit}ª saída` : 'siga pela rotatória';
+            return `Na rotatória, ${saida}${em}`;
+        }
+        case 'Merge': return `Una-se à via${lado ? ` à ${lado}` : ''}${em}`;
+        case 'Fork': return `${lado ? `Na bifurcação, mantenha-se à ${lado}` : 'Na bifurcação, continue em frente'}${em}`;
+        case 'OnRamp': return `Pegue o acesso${lado ? ` à ${lado}` : ''}${em}`;
+        case 'OffRamp': return `Pegue a saída${lado ? ` à ${lado}` : ''}${em}`;
+        case 'EndOfRoad': return `No fim da via, vire${lado ? ` à ${lado}` : ''}${em}`;
+        case 'WaypointReached': return 'Ponto de passagem alcançado';
+        case 'DestinationReached': return 'Você chegou ao destino';
+        default: return null;
+    }
+}
+
+function mensagemErroGPS(err) {
+    if (err?.code === 1) {
+        return 'Permissão de localização negada. Libere o acesso nos ajustes do navegador (no iPhone: Ajustes › Privacidade e Segurança › Serviços de Localização).';
+    }
+    if (err?.code === 3) return 'Tempo esgotado ao obter sua localização.';
+    return 'Não foi possível obter sua localização agora.';
 }
 
 // ───────────────────────── Utilitários de texto ─────────────────────────
@@ -275,15 +400,16 @@ function formatarTempo(segundos) {
     return m ? `${h} h ${m} min` : `${h} h`;
 }
 
-function rotacaoDaManobra(tipo) {
+// Giro da seta do passo: pelo tipo da manobra ou, nos tipos genéricos (Fork, Merge…), pelo modificador
+function rotacaoDaManobra(tipo, modificador) {
     const mapa = {
         Straight: 0, Head: 0, Continue: 0, StartAt: 0,
         SlightRight: 45, Right: 90, SharpRight: 135,
-        TurnAround: 180,
+        TurnAround: 180, Uturn: 180,
         SharpLeft: -135, Left: -90, SlightLeft: -45,
         Roundabout: 90
     };
-    return mapa[tipo] ?? 0;
+    return mapa[tipo] ?? mapa[modificador] ?? 0;
 }
 
 function IconeDoPasso({ passo, size = 20 }) {
@@ -292,7 +418,7 @@ function IconeDoPasso({ passo, size = 20 }) {
         return <Icone nome={nome} size={size} />;
     }
     if (passo.manobra === 'DestinationReached') return <Icone nome="pin" size={size} />;
-    return <Icone nome="arrow" size={size} rotacao={rotacaoDaManobra(passo.manobra)} />;
+    return <Icone nome="arrow" size={size} rotacao={rotacaoDaManobra(passo.manobra, passo.modificador)} />;
 }
 
 // ───────────────────────── Roteamento direto (alternativas + desvios) ─────────────────────────
@@ -309,22 +435,25 @@ function rotearViaRouter(router, pontos, opcoes) {
     });
 }
 
-// Transforma uma rota do OSRM/LRM em "candidata" (geometria + passos do itinerário)
+// Transforma uma rota do OSRM/LRM em "candidata" (geometria + passos do itinerário em português)
 function montarCandidata(rota, formatter, desviada) {
     const coordenadas = rota.coordinates;
     const acumulada = acumularDistancias(coordenadas);
     const total = acumulada[acumulada.length - 1] || rota.summary.totalDistance;
 
-    // As instruções cruas do LRM não trazem `text`; o Formatter gera o texto em português.
     // WaypointReached é o waypoint de fuga: fica invisível no itinerário.
     const instrucoes = (rota.instructions || []).filter((i) => i.type !== 'WaypointReached');
     const passos = instrucoes.map((instr, k) => {
-        let texto;
-        try { texto = formatter.formatInstruction(instr, k); } catch { texto = null; }
+        let texto = textoInstrucaoPt(instr);
+        if (!texto) {
+            // Tipo desconhecido: tenta o formatter do LRM (language 'pt') e, por fim, o nome da via
+            try { texto = formatter.formatInstruction(instr, k); } catch { texto = null; }
+        }
         return {
             id: `m-${k}`,
             tipo: 'manobra',
             manobra: instr.type,
+            modificador: instr.modifier,
             texto: texto || instr.road || 'Continue',
             detalhe: instr.distance > 0 ? `por ${formatarDistancia(instr.distance)}` : '',
             indiceCoord: instr.index
@@ -450,7 +579,7 @@ function ajustarMapa(map, bounds) {
         bounds,
         mobile
             ? { paddingTopLeft: [24, 24], paddingBottomRight: [24, 330] }
-            : { paddingTopLeft: [430, 40], paddingBottomRight: [40, 40] }
+            : { paddingTopLeft: [400, 40], paddingBottomRight: [40, 40] }
     );
 }
 
@@ -482,6 +611,7 @@ export default function MapaABC() {
     // Refs do DOM
     const rootRef = useRef(null);
     const cenaRef = useRef(null);
+    const inputDestinoRef = useRef(null);
 
     // Refs do Leaflet
     const mapRef = useRef(null);
@@ -501,17 +631,21 @@ export default function MapaABC() {
     const faseRef = useRef('busca');
     const rotaAtualRef = useRef(null);
     const candidatasRef = useRef([]);
-    const calcReqRef = useRef(0);          // invalida cálculos antigos (alternativas + desvios)
-    const mistaReqRef = useRef(0);         // invalida montagens antigas da Rota Mista
+    const calcReqRef = useRef(0);
+    const mistaReqRef = useRef(0);
     const altNumericoRef = useRef(true);   // true: alternatives=2; false: alternatives=true
     const processarRotasRef = useRef(null);
     const selecionarRotaRef = useRef(null);
 
     // Refs do GPS / câmera
     const seguirRef = useRef(true);
-    const ultimaPosRef = useRef(null);
+    const ultimaPosRef = useRef(null);     // última posição CRUA do GPS (usada no "recalcular daqui")
+    const posExibidaRef = useRef(null);    // posição desenhada (colada na rota ou crua)
+    const filtroPosRef = useRef(null);     // última posição que passou pelo filtro de 3 m
+    const idxRotaRef = useRef(null);       // último segmento da rota (janela do snap)
     const refRumoRef = useRef(null);       // último ponto usado para deduzir o rumo
     const anguloRef = useRef(0);           // ângulo "desenrolado" (seta + giro do mapa)
+    const zoomInicialRef = useRef(false);  // o zoom mínimo é aplicado só no 1º fix
     const cameraImersivaRef = useRef(false);
     const watchIdRef = useRef(null);
     const wakeLockRef = useRef(null);
@@ -529,25 +663,29 @@ export default function MapaABC() {
     const [modo, setModo] = useState('driving');
     const [emPerigo, setEmPerigo] = useState(false);
     const [erroRota, setErroRota] = useState('');
+    const [localizando, setLocalizando] = useState(false);
     const [fase, setFase] = useState('busca'); // 'busca' | 'itinerario' | 'navegando'
     const [candidatas, setCandidatas] = useState([]);
     const [selecionada, setSelecionada] = useState(0);
-    const [bloqueadas, setBloqueadas] = useState([]); // geometrias descartadas por alagamento
+    const [bloqueadas, setBloqueadas] = useState([]);
     const [rotaAtual, setRotaAtual] = useState(null);
     const [listaAberta, setListaAberta] = useState(true);
     const [seguir, setSeguirState] = useState(true);
     const [progresso, setProgresso] = useState(null);
     const [chegou, setChegou] = useState(false);
 
-    // Câmera: '2d' (Visão Superior) → 'prep' (container cresce) → '3d' (Visão Imersiva) → 'saindo' → '2d'
+    // Câmera: '2d' → 'prep' → '3d' → 'saindo' → '2d'
     const [camera, setCamera] = useState('2d');
-    const [dim3d, setDim3d] = useState(null); // { w, h } do container do mapa na visão 3D
+    const [dim3d, setDim3d] = useState(null);
 
     const setters = { origem: setOrigem, destino: setDestino };
 
     useEffect(() => { modoRef.current = modo; }, [modo]);
     useEffect(() => { faseRef.current = fase; }, [fase]);
-    useEffect(() => { rotaAtualRef.current = rotaAtual; }, [rotaAtual]);
+    useEffect(() => {
+        rotaAtualRef.current = rotaAtual;
+        idxRotaRef.current = null; // rota nova: o snap volta a buscar na rota inteira
+    }, [rotaAtual]);
 
     function definirSeguir(v) {
         seguirRef.current = v;
@@ -693,12 +831,11 @@ export default function MapaABC() {
 
         let cancelado = false;
 
-        // attributionControl desligado: o crédito do OSM fica no overlay (os controles do Leaflet
-        // ficam dentro do container que é inclinado na visão 3D)
+        // attributionControl desligado: o crédito do OSM fica no overlay (fora do container inclinado)
         const map = L.map('mapa-container', { zoomControl: false, attributionControl: false }).setView(
             [CENTRO_ABC.lat, CENTRO_ABC.lng], 13
         );
-        L.control.zoom({ position: 'bottomright' }).addTo(map);
+        L.control.zoom({ position: 'bottomright', zoomInTitle: 'Aproximar', zoomOutTitle: 'Afastar' }).addTo(map);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
         mapRef.current = map;
 
@@ -713,9 +850,11 @@ export default function MapaABC() {
         camadaRotulosRef.current = L.layerGroup().addTo(map);
         camadaMistaRef.current = L.layerGroup().addTo(map);
 
+        // Fallback de texto (o texto principal vem de textoInstrucaoPt)
         formatterRef.current = new L.Routing.Formatter({ language: 'pt' });
 
-        // Arrastar o mapa durante a navegação (visão superior) desliga o "seguir"
+        // CÂMERA LIVRE: arrastar o mapa suspende o setView do GPS até o usuário tocar em "Centralizar".
+        // (movestart não serve aqui: ele também dispara nos movimentos programáticos do próprio follow)
         map.on('dragstart', () => {
             if (seguirRef.current) {
                 seguirRef.current = false;
@@ -745,6 +884,8 @@ export default function MapaABC() {
         const routing = L.Routing.control({
             waypoints: [],
             router,
+            // Português: 'pt' (ou 'pt-BR' se a sua versão do LRM tiver essa localização).
+            // O texto dos passos NÃO depende disso: vem de textoInstrucaoPt().
             language: 'pt',
             show: false,                  // interface nativa oculta
             showAlternatives: true,       // o OSRM devolve as alternativas em e.routes
@@ -754,8 +895,7 @@ export default function MapaABC() {
             draggableWaypoints: false,
             lineOptions: estiloInvisivel,
             altLineOptions: estiloInvisivel,
-            // As linhas são desenhadas por nós (seleção clicável, rótulos, estilos por modo):
-            // o LRM recebe uma camada vazia no lugar da linha dele.
+            // As linhas são desenhadas por nós (seleção clicável, rótulos, estilos por modo)
             routeLine: (route) => {
                 const vazio = L.layerGroup();
                 vazio.getBounds = () => L.latLngBounds(route.coordinates);
@@ -831,47 +971,37 @@ export default function MapaABC() {
     }, []);
 
     // ───── Câmera imersiva ─────
-
-    // O container mudou de tamanho (entrada/saída da visão 3D, rotação do aparelho): o Leaflet precisa recalcular.
-    // invalidateSize mantém o centro geográfico no centro do container.
     useEffect(() => {
         mapRef.current?.invalidateSize({ animate: false });
     }, [dim3d]);
 
-    // Máquina de estados da câmera
     useEffect(() => {
         cameraImersivaRef.current = camera === '3d';
-        const pos = ultimaPosRef.current;
         const recentrar = (animar) => {
-            if (pos && mapRef.current) centralizarCamera(L.latLng(pos.lat, pos.lng), animar);
+            const pos = posExibidaRef.current;
+            if (pos && mapRef.current) centralizarCamera(pos, animar);
         };
 
         if (camera === 'prep') {
-            // O container já cresceu (centro preservado); um instante depois liga o tilt,
-            // assim a transição de CSS parte de um estado já renderizado
             const t = setTimeout(() => setCamera('3d'), 60);
             return () => clearTimeout(t);
         }
-
         if (camera === '3d') {
             atualizarGiro();
-            recentrar(true); // aplica o offset: marcador desce na tela
+            recentrar(true);
             return undefined;
         }
-
         if (camera === 'saindo') {
-            recentrar(true); // volta a centralizar o marcador enquanto o ângulo desfaz
+            recentrar(true);
             const t = setTimeout(() => {
                 setCamera('2d');
                 setDim3d(null);
             }, DURACAO_TRANSICAO_MS + 60);
             return () => clearTimeout(t);
         }
-
         return undefined;
     }, [camera]);
 
-    // Redimensiona a cena 3D se a janela mudar (ex.: girar o celular)
     useEffect(() => {
         if (camera === '2d') return undefined;
         const aoRedimensionar = () => {
@@ -883,7 +1013,6 @@ export default function MapaABC() {
         return () => window.removeEventListener('resize', aoRedimensionar);
     }, [camera]);
 
-    // Segurança: saiu da navegação → volta para a visão superior
     useEffect(() => {
         if (fase !== 'navegando' && camera !== '2d') resetarCamera();
     }, [fase, camera]);
@@ -906,20 +1035,21 @@ export default function MapaABC() {
         setDim3d(null);
     }
 
-    // Gira o plano do mapa para que a frente do motorista fique para cima (CSS var lida no transform)
     function atualizarGiro() {
         const giro = ROTACIONAR_MAPA_NA_VISAO_3D ? -anguloRef.current : 0;
         rootRef.current?.style.setProperty('--mabc-giro', `${giro}deg`);
     }
 
-    // Centraliza o mapa no motorista. Na visão imersiva aplica o offset em pixels:
-    // o centro do mapa vai para "à frente" do marcador, que desce na tela.
+    // Centraliza o mapa no motorista (na visão imersiva, com offset em pixels: marcador desce na tela)
     function centralizarCamera(ll, animar = true) {
         const map = mapRef.current;
         if (!map) return;
 
         if (!cameraImersivaRef.current) {
-            map.setView(ll, Math.max(map.getZoom(), ZOOM_NAVEGACAO), { animate: animar, duration: 0.8 });
+            // O zoom mínimo só vale no 1º fix: depois disso o zoom escolhido pelo usuário é respeitado
+            const zoom = zoomInicialRef.current ? map.getZoom() : Math.max(map.getZoom(), ZOOM_NAVEGACAO);
+            zoomInicialRef.current = true;
+            map.setView(ll, zoom, { animate: animar, duration: 0.8 });
             return;
         }
 
@@ -928,10 +1058,17 @@ export default function MapaABC() {
         const offset = offsetCameraPx(alturaCena);
         const rad = ROTACIONAR_MAPA_NA_VISAO_3D ? (anguloRef.current * Math.PI) / 180 : 0;
 
-        // Direção da frente do motorista em pixels do mapa: (sen h, −cos h) — norte é −y
+        // Frente do motorista em pixels do mapa: (sen h, −cos h) — norte é −y
         const p = map.project(ll, zoom);
         const centro = map.unproject(L.point(p.x + Math.sin(rad) * offset, p.y - Math.cos(rad) * offset), zoom);
         map.setView(centro, zoom, { animate: animar, duration: 0.8 });
+    }
+
+    // Botão flutuante "Centralizar": retoma o follow
+    function centralizar() {
+        definirSeguir(true);
+        const pos = posExibidaRef.current;
+        if (pos) centralizarCamera(pos, true);
     }
 
     // ───── Marcadores de origem/destino ─────
@@ -941,12 +1078,12 @@ export default function MapaABC() {
         camada.clearLayers();
         if (origem.coord) {
             L.circleMarker([origem.coord.lat, origem.coord.lng], {
-                radius: 9, color: '#fff', weight: 3, fillColor: '#2563eb', fillOpacity: 1
+                radius: 9, color: '#fff', weight: 3, fillColor: COR_AZUL, fillOpacity: 1
             }).bindTooltip('Origem').addTo(camada);
         }
         if (destino.coord) {
             L.circleMarker([destino.coord.lat, destino.coord.lng], {
-                radius: 9, color: '#fff', weight: 3, fillColor: '#dc2626', fillOpacity: 1
+                radius: 9, color: '#fff', weight: 3, fillColor: COR_MARINHO, fillOpacity: 1
             }).bindTooltip('Destino').addTo(camada);
         }
     }, [origem.coord, destino.coord]);
@@ -962,7 +1099,6 @@ export default function MapaABC() {
         const navegando = fase === 'navegando';
         const estilo = MODOS[modo].estilo;
 
-        // Rotas descartadas por alagamento (apenas como contexto visual)
         if (!navegando) {
             bloqueadas.forEach((coords) => {
                 L.polyline(coords, {
@@ -974,7 +1110,7 @@ export default function MapaABC() {
 
         candidatas.forEach((c, i) => {
             const sel = i === selecionada;
-            if (navegando && !sel) return; // durante a viagem só a rota escolhida
+            if (navegando && !sel) return;
 
             if (sel) {
                 L.polyline(c.coordenadas, {
@@ -983,9 +1119,8 @@ export default function MapaABC() {
                 L.polyline(c.coordenadas, { ...estilo, pane: 'rotas', interactive: false }).addTo(camada);
             } else {
                 L.polyline(c.coordenadas, {
-                    color: '#94a3b8', weight: 7, opacity: 0.85, pane: 'rotasAlt', interactive: false
+                    color: COR_AZUL_CLARO, weight: 7, opacity: 0.9, pane: 'rotasAlt', interactive: false
                 }).addTo(camada);
-                // Área de clique larga e quase invisível por cima da alternativa
                 L.polyline(c.coordenadas, {
                     color: '#000', weight: 24, opacity: 0.01, pane: 'rotasAlt', bubblingMouseEvents: false
                 })
@@ -993,7 +1128,6 @@ export default function MapaABC() {
                     .addTo(camada);
             }
 
-            // Rótulo clicável com o tempo de cada opção (estilo Google Maps)
             if (!navegando && candidatas.length > 1) {
                 const frac = [0.5, 0.35, 0.65][i] ?? 0.5;
                 const ponto = c.coordenadas[indiceNaDistancia(c.acumulada, c.total * frac)];
@@ -1090,6 +1224,42 @@ export default function MapaABC() {
         mapRef.current?.panTo([s.lat, s.lng]);
     }
 
+    // ───── "Meu Local": origem = posição atual, em UMA leitura (sem navegação GPS ativa) ─────
+    // iOS/Safari: o pedido de permissão só é aceito dentro de um gesto do usuário. Por isso
+    // getCurrentPosition é chamado DIRETO no onClick do botão (nunca em useEffect, nunca após um await).
+    function usarMeuLocal() {
+        if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+            setErroRota('Seu navegador não suporta geolocalização.');
+            return;
+        }
+        if (!window.isSecureContext) {
+            setErroRota('A localização só funciona em conexão segura (HTTPS).');
+            return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                const { latitude: lat, longitude: lng } = pos.coords;
+                setOrigem({ texto: 'Minha localização', coord: { lat, lng } });
+                setSugestoes((prev) => ({ ...prev, origem: [] }));
+                setCampoAberto(null);
+                setErroRota('');
+                setLocalizando(false);
+                const map = mapRef.current;
+                if (map) map.setView([lat, lng], Math.max(map.getZoom(), 15), { animate: true });
+                inputDestinoRef.current?.focus();
+            },
+            (err) => {
+                setLocalizando(false);
+                setErroRota(mensagemErroGPS(err));
+            },
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+        );
+
+        setErroRota('');
+        setLocalizando(true);
+    }
+
     // ───── Cálculo de rota ─────
     function calcular(inicio, fim) {
         const routing = routingRef.current;
@@ -1142,10 +1312,10 @@ export default function MapaABC() {
         }
     }
 
-    // Gatilho: Enter com origem e destino definidos
+    // Gatilho: Enter com origem e destino definidos (a origem pode ser digitada, escolhida ou "Meu Local")
     function tracarRota() {
         if (!origem.coord || !destino.coord) {
-            setErroRota('Escolha origem e destino na lista de sugestões e pressione Enter.');
+            setErroRota('Defina origem e destino (use as sugestões ou "Meu local") e pressione Enter.');
             return;
         }
         calcular(
@@ -1246,6 +1416,9 @@ export default function MapaABC() {
         marcadorUsuarioRef.current = null;
         precisaoRef.current = null;
         refRumoRef.current = null;
+        filtroPosRef.current = null;
+        posExibidaRef.current = null;
+        idxRotaRef.current = null;
         anguloRef.current = 0;
         rootRef.current?.style.setProperty('--mabc-giro', '0deg');
         soltarWakeLock();
@@ -1258,85 +1431,139 @@ export default function MapaABC() {
         if (rot) rot.style.transform = `rotate(${anguloRef.current}deg)`;
     }
 
+    // Cada leitura do GPS passa por: (1) snap-to-route → (2) filtro de sensibilidade → (3) marcador/câmera/progresso
     function aoReceberPosicao(pos) {
-        const { latitude: lat, longitude: lng, accuracy, heading, speed } = pos.coords;
         const map = mapRef.current;
         if (!map) return;
 
-        const ll = L.latLng(lat, lng);
+        const { latitude: lat, longitude: lng, accuracy, heading, speed } = pos.coords;
+        const bruto = L.latLng(lat, lng);
         ultimaPosRef.current = { lat, lng };
 
-        // Rumo: usa o `heading` do GPS quando é confiável; senão deduz pelo deslocamento
-        const anterior = refRumoRef.current;
-        const moveu = anterior ? anterior.distanceTo(ll) > 5 : false;
-        let rumo = null;
-        if (Number.isFinite(heading) && (speed == null || speed > 0.8)) rumo = heading;
-        else if (moveu) rumo = calcularRumo(anterior, ll);
-        if (!anterior || moveu) refRumoRef.current = ll;
+        // 1) SNAP-TO-ROUTE: projeta a coordenada crua no segmento mais próximo da rota selecionada
+        const rota = rotaAtualRef.current;
+        const proj = rota?.coordenadas?.length > 1
+            ? projetarNaRota(rota.coordenadas, lat, lng, idxRotaRef.current)
+            : null;
+        const limiteSnap = Math.max(LIMITE_SNAP_M, Math.min(accuracy || 0, 60));
+        const colado = !!proj && proj.desvioM <= limiteSnap;
+        const exibido = colado ? proj.ponto : bruto; // fora da rota mostra a posição real
+        if (colado) idxRotaRef.current = proj.idx;
 
-        if (rumo != null) {
+        // 2) FILTRO DE SENSIBILIDADE
+        const anteriorFiltro = filtroPosRef.current;
+        const deslocou = !anteriorFiltro || anteriorFiltro.distanceTo(exibido) > LIMIAR_DESLOCAMENTO_M;
+
+        // Rumo candidato: segmento da rota (se colado) > heading do GPS > deslocamento entre leituras
+        const refRumo = refRumoRef.current;
+        const moveuParaRumo = refRumo ? refRumo.distanceTo(exibido) > 5 : false;
+        const rumoGPS = Number.isFinite(heading) && (speed == null || speed > 0.8) ? heading : null;
+        let rumo = null;
+        if (colado) {
+            // Se o GPS aponta para o sentido oposto da rota (contramão/retorno), confia no GPS
+            rumo = rumoGPS != null && difAngular(rumoGPS, proj.rumoSegmento) > 90 ? rumoGPS : proj.rumoSegmento;
+        } else {
+            rumo = rumoGPS ?? (moveuParaRumo ? calcularRumo(refRumo, exibido) : null);
+        }
+        if (!refRumo || moveuParaRumo) refRumoRef.current = exibido;
+
+        const girou = rumo != null && difAngular(rumo, anguloRef.current) >= LIMIAR_ANGULO_GRAUS;
+
+        // Dentro do ruído do GPS: não mexe em marcador, mapa nem ícone
+        if (!deslocou && !girou) return;
+
+        if (girou) {
             // "Desenrola" o ângulo para a seta (e o giro do mapa) não darem a volta longa (359° → 1°)
             const delta = ((((rumo - anguloRef.current + 540) % 360) + 360) % 360) - 180;
             anguloRef.current += delta;
         }
 
-        // Marcador em formato de seta + círculo de precisão
-        if (!marcadorUsuarioRef.current) {
-            marcadorUsuarioRef.current = L.marker(ll, {
-                icon: L.divIcon({
-                    className: 'mabc-seta',
-                    html:
-                        '<div class="mabc-seta-wrap"><span class="mabc-seta-pulso"></span>' +
-                        '<div class="mabc-seta-rot"><svg viewBox="0 0 24 24"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z" fill="#2563eb" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg></div></div>',
-                    iconSize: [44, 44], iconAnchor: [22, 22]
-                }),
-                interactive: false, keyboard: false, zIndexOffset: 1000
-            }).addTo(map);
-            precisaoRef.current = L.circle(ll, {
-                radius: accuracy, stroke: false, fillColor: '#3b82f6', fillOpacity: 0.12, interactive: false
-            }).addTo(map);
-        } else {
-            marcadorUsuarioRef.current.setLatLng(ll);
-            precisaoRef.current.setLatLng(ll).setRadius(accuracy);
+        // 3) MARCADOR sobre a linha
+        let criouAgora = false;
+        if (deslocou) {
+            filtroPosRef.current = exibido;
+            posExibidaRef.current = exibido;
+
+            if (!marcadorUsuarioRef.current) {
+                criouAgora = true;
+                marcadorUsuarioRef.current = L.marker(exibido, {
+                    icon: L.divIcon({
+                        className: 'mabc-seta',
+                        html:
+                            '<div class="mabc-seta-wrap"><span class="mabc-seta-pulso"></span>' +
+                            `<div class="mabc-seta-rot"><svg viewBox="0 0 24 24"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z" fill="${COR_AZUL_CLARO}" stroke="${COR_MARINHO}" stroke-width="1.6" stroke-linejoin="round"/></svg></div></div>`,
+                        iconSize: [44, 44], iconAnchor: [22, 22]
+                    }),
+                    interactive: false, keyboard: false, zIndexOffset: 1000
+                }).addTo(map);
+                precisaoRef.current = L.circle(exibido, {
+                    radius: colado ? 0 : accuracy, stroke: false,
+                    fillColor: COR_AZUL, fillOpacity: 0.14, interactive: false
+                }).addTo(map);
+            } else {
+                marcadorUsuarioRef.current.setLatLng(exibido);
+                // O círculo de precisão só aparece quando o marcador NÃO está colado na rota
+                precisaoRef.current.setLatLng(exibido).setRadius(colado ? 0 : accuracy);
+            }
         }
-        aplicarRumoNaSeta();
-        atualizarGiro();
 
-        // Mantém o motorista centralizado (com offset na visão imersiva) a cada atualização do GPS
-        if (seguirRef.current) centralizarCamera(ll);
+        if (girou || criouAgora) {
+            aplicarRumoNaSeta();
+            atualizarGiro();
+        }
 
-        const prog = calcularProgresso(rotaAtualRef.current, lat, lng, accuracy);
-        if (!prog) return;
-        setProgresso(prog);
+        // Câmera: só acompanha se o usuário não arrastou o mapa (CÂMERA LIVRE)
+        if (seguirRef.current && posExibidaRef.current && (deslocou || (girou && cameraImersivaRef.current))) {
+            centralizarCamera(posExibidaRef.current);
+        }
 
-        if (prog.restanteM <= RAIO_CHEGADA_M) {
-            setChegou(true);
-            if (watchIdRef.current != null) navigator.geolocation.clearWatch(watchIdRef.current);
-            watchIdRef.current = null;
-            soltarWakeLock();
+        // Progresso na rota / chegada
+        if (deslocou && proj) {
+            const prog = calcularProgresso(rota, proj, accuracy);
+            if (prog) {
+                setProgresso(prog);
+                if (prog.restanteM <= RAIO_CHEGADA_M) {
+                    setChegou(true);
+                    if (watchIdRef.current != null) navigator.geolocation.clearWatch(watchIdRef.current);
+                    watchIdRef.current = null;
+                    soltarWakeLock();
+                }
+            }
         }
     }
 
     function aoErroPosicao(err) {
-        const mensagens = {
-            1: 'Permissão de localização negada. Libere o acesso nas configurações do navegador.',
-            2: 'Não foi possível obter sua localização agora.',
-            3: 'Tempo esgotado ao obter sua localização.'
-        };
-        setErroRota(mensagens[err.code] || 'Erro ao acessar o GPS.');
+        setErroRota(mensagemErroGPS(err));
         if (err.code === 1) encerrarNavegacao();
     }
 
     // Botão "Ir Agora"
+    // iOS/Safari: o watchPosition é disparado AQUI, de forma síncrona no onClick (gesto do usuário),
+    // antes de qualquer setState/await. Não há chamada de geolocalização em nenhum useEffect.
     function iniciarNavegacao() {
         const rota = rotaAtualRef.current;
         if (!rota || rota.carregando) return;
 
-        // A Geolocation API exige contexto seguro (HTTPS ou localhost)
         if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
             setErroRota('Seu navegador não suporta geolocalização.');
             return;
         }
+        if (!window.isSecureContext) {
+            setErroRota('A navegação por GPS só funciona em conexão segura (HTTPS).');
+            return;
+        }
+
+        if (watchIdRef.current != null) navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = navigator.geolocation.watchPosition(aoReceberPosicao, aoErroPosicao, {
+            enableHighAccuracy: true, maximumAge: 1000, timeout: 20000
+        });
+
+        // Estado novo de navegação (o 1º fix sempre passa pelo filtro e aplica o zoom mínimo)
+        filtroPosRef.current = null;
+        posExibidaRef.current = null;
+        refRumoRef.current = null;
+        idxRotaRef.current = null;
+        zoomInicialRef.current = false;
 
         setErroRota('');
         setChegou(false);
@@ -1345,11 +1572,6 @@ export default function MapaABC() {
         definirSeguir(true);
         setFase('navegando');
         pedirWakeLock();
-
-        if (watchIdRef.current != null) navigator.geolocation.clearWatch(watchIdRef.current);
-        watchIdRef.current = navigator.geolocation.watchPosition(aoReceberPosicao, aoErroPosicao, {
-            enableHighAccuracy: true, maximumAge: 1000, timeout: 20000
-        });
     }
 
     function encerrarNavegacao() {
@@ -1359,12 +1581,6 @@ export default function MapaABC() {
         setProgresso(null);
         setListaAberta(true);
         setFase((f) => (f === 'navegando' ? 'itinerario' : f));
-    }
-
-    function recentralizar() {
-        definirSeguir(true);
-        const pos = ultimaPosRef.current;
-        if (pos) centralizarCamera(L.latLng(pos.lat, pos.lng));
     }
 
     // Fora da rota: recalcula a partir da posição atual (alternativas + desvio de alagamento de novo)
@@ -1382,7 +1598,6 @@ export default function MapaABC() {
     const proximoPasso = progresso && rotaAtual ? rotaAtual.passos[progresso.idxProximo] : null;
     const imersiva = camera === '3d' || camera === 'prep';
 
-    // Tamanho do container na visão 3D (centralizado na cena). Em 2D: sem estilo → "inset: 0" do CSS.
     const estiloMapa = dim3d
         ? {
             left: '50%', top: '50%', right: 'auto', bottom: 'auto',
@@ -1401,27 +1616,28 @@ export default function MapaABC() {
                         onClick={() => mudarModo(chave)}
                         aria-pressed={modo === chave} aria-label={m.rotulo} title={m.rotulo}
                     >
-                        <Icone nome={m.icone} size={22} />
+                        <Icone nome={m.icone} size={20} />
                     </button>
                 ))}
                 {comLimpar && (
                     <button type="button" className="mabc-icone-btn" onClick={limparRota} aria-label="Limpar rota" title="Limpar">
-                        <Icone nome="close" size={20} />
+                        <Icone nome="close" size={18} />
                     </button>
                 )}
             </div>
         );
     }
 
-    function renderCampo(campo, estado, placeholder) {
+    function renderCampo(campo, estado, placeholder, acaoExtra) {
         const lista = sugestoes[campo];
         const mostrar = campoAberto === campo && lista.length > 0;
 
         return (
             <div className="mabc-campo">
                 <input
+                    ref={campo === 'destino' ? inputDestinoRef : undefined}
                     type="text"
-                    className={`mabc-input${estado.coord ? ' definido' : ''}`}
+                    className={`mabc-input${estado.coord ? ' definido' : ''}${acaoExtra ? ' com-acao' : ''}`}
                     value={estado.texto}
                     placeholder={placeholder}
                     autoComplete="off" spellCheck={false} aria-label={placeholder}
@@ -1430,6 +1646,7 @@ export default function MapaABC() {
                     onFocus={() => setCampoAberto(campo)}
                     onBlur={() => setCampoAberto(null)}
                 />
+                {acaoExtra}
 
                 {mostrar && (
                     <ul className="mabc-dropdown" role="listbox">
@@ -1456,7 +1673,6 @@ export default function MapaABC() {
     }
 
     return (
-        // A classe mabc-cam-{estado} liga/desliga o tilt via CSS; --mabc-giro (CSS var) é atualizada a cada GPS
         <div ref={rootRef} className={`mabc-root mabc-cam-${camera}`}>
             <style>{CSS}</style>
 
@@ -1468,7 +1684,7 @@ export default function MapaABC() {
 
             {/* Camada 1000: overlay isolado; só os painéis recebem cliques */}
             <div className="mabc-overlay">
-                {/* ───── Fase 1: busca ───── */}
+                {/* ───── Fase 1: busca (painel compacto) ───── */}
                 {fase === 'busca' && (
                     <div className="mabc-painel">
                         {renderModos(true)}
@@ -1477,14 +1693,26 @@ export default function MapaABC() {
                             <div className="mabc-trilho" aria-hidden="true">
                                 <span className="mabc-bolinha" />
                                 <span className="mabc-linha" />
-                                <span className="mabc-pino"><Icone nome="pin" size={20} /></span>
+                                <span className="mabc-pino"><Icone nome="pin" size={18} /></span>
                             </div>
                             <div className="mabc-inputs">
-                                {renderCampo('origem', origem, 'Escolha o ponto de partida')}
-                                {renderCampo('destino', destino, 'Escolha o destino')}
+                                {renderCampo('origem', origem, 'Origem', (
+                                    // Ícone "Localização atual": origem = posição do GPS, em uma leitura única
+                                    <button
+                                        type="button"
+                                        className={`mabc-input-acao${localizando ? ' carregando' : ''}`}
+                                        onClick={usarMeuLocal}
+                                        disabled={localizando}
+                                        aria-label="Usar minha localização atual"
+                                        title="Meu local"
+                                    >
+                                        <Icone nome="locate" size={20} />
+                                    </button>
+                                ))}
+                                {renderCampo('destino', destino, 'Destino — Enter para traçar')}
                             </div>
                             <button type="button" className="mabc-icone-btn" onClick={inverter} aria-label="Inverter origem e destino" title="Inverter">
-                                <Icone nome="swap" size={22} />
+                                <Icone nome="swap" size={20} />
                             </button>
                         </div>
 
@@ -1492,18 +1720,14 @@ export default function MapaABC() {
                         {erroRota && <div className="mabc-erro">{erroRota}</div>}
 
                         {rotaAtual && (
-                            <button type="button" className="mabc-btn-sec" onClick={() => setFase('itinerario')}>
-                                <Icone nome="list" size={18} /> Ver rotas e passos
+                            <button type="button" className="mabc-btn-sec compacto" onClick={() => setFase('itinerario')}>
+                                <Icone nome="list" size={16} /> Ver rotas e passos
                             </button>
                         )}
-
-                        <div className="mabc-dica">
-                            Escolha as sugestões e pressione <kbd>Enter</kbd> para traçar a rota
-                        </div>
                     </div>
                 )}
 
-                {/* ───── Fase 2: escolha da rota + itinerário (inputs ocultos) ───── */}
+                {/* ───── Fase 2: escolha da rota + itinerário ───── */}
                 {fase === 'itinerario' && rotaAtual && (
                     <div className={`mabc-painel mabc-itin${listaAberta ? '' : ' recolhido'}`}>
                         <button
@@ -1516,7 +1740,7 @@ export default function MapaABC() {
 
                         <div className="mabc-itin-topo">
                             <button type="button" className="mabc-icone-btn" onClick={() => setFase('busca')} aria-label="Editar origem e destino" title="Editar">
-                                <Icone nome="back" size={22} />
+                                <Icone nome="back" size={20} />
                             </button>
                             <div className="mabc-itin-titulo">
                                 <span>{origem.texto || 'Origem'}</span>
@@ -1524,13 +1748,12 @@ export default function MapaABC() {
                                 <span>{destino.texto || 'Destino'}</span>
                             </div>
                             <button type="button" className="mabc-icone-btn" onClick={limparRota} aria-label="Limpar rota" title="Limpar">
-                                <Icone nome="close" size={20} />
+                                <Icone nome="close" size={18} />
                             </button>
                         </div>
 
                         {renderModos(false)}
 
-                        {/* Opções de rota (também clicáveis no mapa) */}
                         {candidatas.length > 1 && (
                             <div className="mabc-opcoes" role="radiogroup" aria-label="Rotas disponíveis">
                                 {candidatas.map((c, i) => (
@@ -1564,9 +1787,7 @@ export default function MapaABC() {
                                 <span className="mabc-resumo-dist">Montando rota mista…</span>
                             ) : (
                                 <>
-                                    <span className="mabc-resumo-tempo" style={{ color: cfgModo.estilo.color }}>
-                                        {formatarTempo(rotaAtual.tempo)}
-                                    </span>
+                                    <span className="mabc-resumo-tempo">{formatarTempo(rotaAtual.tempo)}</span>
                                     <span className="mabc-resumo-dist">{formatarDistancia(rotaAtual.total)}</span>
                                     {rotaAtual.simulado && <span className="mabc-selo">Simulado</span>}
                                 </>
@@ -1594,7 +1815,7 @@ export default function MapaABC() {
                     <div className="mabc-painel mabc-nav">
                         {chegou ? (
                             <div className="mabc-nav-banner chegou">
-                                <span className="mabc-nav-icone"><Icone nome="pin" size={32} /></span>
+                                <span className="mabc-nav-icone"><Icone nome="pin" size={30} /></span>
                                 <div>
                                     <div className="mabc-nav-texto">Você chegou ao destino</div>
                                     <div className="mabc-nav-dist">{destino.texto}</div>
@@ -1603,7 +1824,7 @@ export default function MapaABC() {
                         ) : (
                             <div className="mabc-nav-banner">
                                 <span className="mabc-nav-icone">
-                                    {proximoPasso ? <IconeDoPasso passo={proximoPasso} size={32} /> : <Icone nome="locate" size={32} />}
+                                    {proximoPasso ? <IconeDoPasso passo={proximoPasso} size={30} /> : <Icone nome="locate" size={30} />}
                                 </span>
                                 <div style={{ minWidth: 0 }}>
                                     <div className="mabc-nav-dist">
@@ -1632,13 +1853,8 @@ export default function MapaABC() {
                         {erroRota && <div className="mabc-erro">{erroRota}</div>}
 
                         <div className="mabc-nav-acoes">
-                            {!seguir && camera === '2d' && (
-                                <button type="button" className="mabc-btn-sec" onClick={recentralizar}>
-                                    <Icone nome="locate" size={18} /> Recentralizar
-                                </button>
-                            )}
-                            <button type="button" className="mabc-btn-sec" onClick={() => setListaAberta((v) => !v)}>
-                                <Icone nome="list" size={18} /> {listaAberta ? 'Ocultar passos' : 'Passos'}
+                            <button type="button" className="mabc-btn-sec compacto" onClick={() => setListaAberta((v) => !v)}>
+                                <Icone nome="list" size={16} /> {listaAberta ? 'Ocultar passos' : 'Passos'}
                             </button>
                             <button type="button" className="mabc-btn-enc" onClick={encerrarNavegacao}>
                                 {chegou ? 'Concluir' : 'Encerrar'}
@@ -1654,6 +1870,13 @@ export default function MapaABC() {
                     </div>
                 )}
 
+                {/* Botão flutuante "Centralizar": aparece quando o usuário arrastou o mapa */}
+                {fase === 'navegando' && !seguir && camera === '2d' && (
+                    <button type="button" className="mabc-btn-centralizar" onClick={centralizar}>
+                        <Icone nome="locate" size={20} /> Centralizar
+                    </button>
+                )}
+
                 {/* Botão flutuante: Visão Superior (2D) ⇄ Visão Imersiva (3D) — só na navegação ativa */}
                 {fase === 'navegando' && (
                     <button
@@ -1665,7 +1888,7 @@ export default function MapaABC() {
                         aria-label={imersiva ? 'Voltar para a Visão Superior' : 'Ativar a Visão Imersiva'}
                         title={imersiva ? 'Visão Superior' : 'Visão Imersiva'}
                     >
-                        <Icone nome="compass" size={24} />
+                        <Icone nome="compass" size={22} />
                         <span>{imersiva ? '2D' : '3D'}</span>
                     </button>
                 )}
@@ -1695,10 +1918,18 @@ export default function MapaABC() {
 const CSS = `
 /* Pilha de camadas: cena (0) → overlay (1000). Nada do Leaflet escapa do contexto da cena. */
 .mabc-root {
+    /* Paleta: azul marinho + azul claro */
+    --mc-marinho: ${COR_MARINHO};
+    --mc-marinho-2: ${COR_MARINHO_2};
+    --mc-azul: ${COR_AZUL};
+    --mc-azul-claro: ${COR_AZUL_CLARO};
+    --mc-azul-palido: #e4f0fc;
+    --mc-texto-2: #5a7391;
+    --mabc-giro: 0deg;
+
     position: relative; isolation: isolate; width: 100%;
     height: 100vh; height: 100dvh; overflow: hidden; background: #e5e7eb;
-    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #0f172a;
-    --mabc-giro: 0deg;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: var(--mc-marinho);
 }
 .mabc-overlay { position: absolute; inset: 0; z-index: 1000; pointer-events: none; }
 .mabc-overlay > * { pointer-events: auto; }
@@ -1710,11 +1941,10 @@ const CSS = `
    transform: translate3d(...) inline no pane a cada pan e quebraria. */
 .mabc-cena {
     position: absolute; inset: 0; z-index: 0; overflow: hidden;
-    background: linear-gradient(#cfe0f3, #e6eef8); /* "céu" visível além do horizonte */
+    background: linear-gradient(#cfe0f3, #e6eef8);
 }
 .mabc-mapa {
     position: absolute; inset: 0; z-index: 0; transform-origin: 50% 50%;
-    /* estado base com as MESMAS funções do estado inclinado → a transition interpola suavemente */
     transform: perspective(${PERSPECTIVA_PX}px) rotateX(0deg) rotateZ(0deg);
     transition: transform ${DURACAO_TRANSICAO_MS}ms cubic-bezier(.4, 0, .2, 1);
     will-change: transform;
@@ -1722,12 +1952,10 @@ const CSS = `
 .mabc-cam-3d .mabc-mapa {
     transform: perspective(${PERSPECTIVA_PX}px) rotateX(${INCLINACAO_GRAUS}deg) rotateZ(var(--mabc-giro, 0deg));
 }
-/* Com o plano inclinado o hit-testing do Leaflet (getBoundingClientRect) deixa de valer: sem interação com o mapa */
 .mabc-cam-prep .mabc-mapa, .mabc-cam-3d .mabc-mapa, .mabc-cam-saindo .mabc-mapa { pointer-events: none; }
 .mabc-cam-prep .leaflet-control-container, .mabc-cam-3d .leaflet-control-container, .mabc-cam-saindo .leaflet-control-container { display: none; }
-.mabc-root .leaflet-bottom { margin-bottom: 22px; } /* abre espaço para o crédito do OSM */
+.mabc-root .leaflet-bottom { margin-bottom: 22px; }
 
-/* Névoa do horizonte: esconde a borda distante do mapa na visão imersiva */
 .mabc-ceu {
     position: absolute; left: 0; right: 0; top: 0; height: 42%; z-index: 2; pointer-events: none; opacity: 0;
     transition: opacity ${DURACAO_TRANSICAO_MS}ms ease;
@@ -1737,184 +1965,209 @@ const CSS = `
 }
 .mabc-cam-3d .mabc-ceu { opacity: 1; }
 
-/* Botão flutuante 2D/3D */
+/* Botões flutuantes: 2D/3D e Centralizar */
 .mabc-btn-camera {
     position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px;
-    width: 58px; height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    border: none; border-radius: 50%; cursor: pointer; font: 800 11px system-ui, sans-serif; letter-spacing: .04em;
-    color: #334155; background: rgba(255, 255, 255, 0.95);
-    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.28);
+    width: 54px; height: 54px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.7); border-radius: 50%; cursor: pointer;
+    font: 800 10.5px system-ui, sans-serif; letter-spacing: .04em; color: var(--mc-marinho);
+    background: rgba(255, 255, 255, 0.82);
+    -webkit-backdrop-filter: blur(14px) saturate(1.5); backdrop-filter: blur(14px) saturate(1.5);
+    box-shadow: 0 6px 20px rgba(11, 37, 69, 0.22);
     transition: background .15s, color .15s, transform .12s;
 }
-.mabc-btn-camera.ativo { color: #fff; background: #1d4ed8; }
+.mabc-btn-camera.ativo { color: #fff; background: var(--mc-marinho); }
 .mabc-btn-camera:active { transform: scale(.94); }
 .mabc-btn-camera:disabled { opacity: .75; cursor: default; }
+
+.mabc-btn-centralizar {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: calc(44px + env(safe-area-inset-bottom, 0px));
+    display: inline-flex; align-items: center; gap: 8px; height: 46px; padding: 0 20px;
+    border: none; border-radius: 999px; cursor: pointer; font: 700 15px system-ui, sans-serif;
+    color: #fff; background: linear-gradient(135deg, var(--mc-marinho-2), var(--mc-marinho));
+    box-shadow: 0 8px 22px rgba(11, 37, 69, 0.4);
+    transition: filter .15s;
+}
+.mabc-btn-centralizar:hover { filter: brightness(1.12); }
 
 /* Crédito do OSM */
 .mabc-atribuicao {
     position: absolute; right: 8px; bottom: calc(4px + env(safe-area-inset-bottom, 0px));
-    padding: 2px 8px; font-size: 11px; color: #475569; text-decoration: none;
+    padding: 2px 8px; font-size: 11px; color: var(--mc-texto-2); text-decoration: none;
     background: rgba(255, 255, 255, 0.82); border-radius: 6px;
 }
 
-/* Painel base (glassmorphism) */
+/* ── Painel base: glassmorphism compacto ── */
 .mabc-painel {
-    position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); left: 16px;
-    width: min(390px, calc(100% - 32px)); box-sizing: border-box; padding: 12px;
-    background: rgba(255, 255, 255, 0.93);
-    -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4);
-    border: 1px solid rgba(255, 255, 255, 0.7); border-radius: 20px;
-    box-shadow: 0 10px 32px rgba(15, 23, 42, 0.18), 0 1px 3px rgba(15, 23, 42, 0.08);
+    position: absolute; top: calc(14px + env(safe-area-inset-top, 0px)); left: 14px;
+    width: min(344px, calc(100% - 28px)); box-sizing: border-box; padding: 10px;
+    background: rgba(255, 255, 255, 0.72);
+    -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
+    border: 1px solid rgba(255, 255, 255, 0.6); border-radius: 24px;
+    box-shadow: 0 10px 30px rgba(11, 37, 69, 0.16), 0 1px 2px rgba(11, 37, 69, 0.08);
 }
 .mabc-itin, .mabc-nav {
     display: flex; flex-direction: column;
-    max-height: calc(100% - 32px - env(safe-area-inset-top, 0px));
+    max-height: calc(100% - 28px - env(safe-area-inset-top, 0px));
 }
+.mabc-itin { width: min(372px, calc(100% - 28px)); }
 
 /* Modos de transporte e botões */
-.mabc-modos { display: flex; align-items: center; gap: 4px; margin-bottom: 12px; }
+.mabc-modos { display: flex; align-items: center; gap: 2px; margin-bottom: 8px; }
 .mabc-modo {
-    flex: 1; height: 42px; display: flex; align-items: center; justify-content: center;
-    border: none; border-radius: 12px; background: transparent; color: #64748b; cursor: pointer;
+    flex: 1; height: 34px; display: flex; align-items: center; justify-content: center;
+    border: none; border-radius: 12px; background: transparent; color: var(--mc-texto-2); cursor: pointer;
     transition: background .15s, color .15s;
 }
-.mabc-modo:hover { background: #f1f5f9; }
-.mabc-modo.ativo { background: #dbeafe; color: #1d4ed8; }
+.mabc-modo:hover { background: rgba(143, 195, 245, 0.28); }
+.mabc-modo.ativo { background: var(--mc-marinho); color: #fff; }
 .mabc-icone-btn {
-    width: 40px; height: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
-    border: none; border-radius: 50%; background: transparent; color: #64748b; cursor: pointer; transition: background .15s;
+    width: 34px; height: 34px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    border: none; border-radius: 50%; background: transparent; color: var(--mc-texto-2); cursor: pointer; transition: background .15s;
 }
-.mabc-icone-btn:hover { background: #f1f5f9; }
+.mabc-icone-btn:hover { background: rgba(143, 195, 245, 0.28); }
 .mabc-btn-sec, .mabc-btn-enc {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    height: 44px; padding: 0 16px; border: none; border-radius: 12px; cursor: pointer;
-    font: inherit; font-size: 15px; font-weight: 600; transition: filter .15s, background .15s;
+    height: 42px; padding: 0 16px; border: none; border-radius: 14px; cursor: pointer;
+    font: inherit; font-size: 14.5px; font-weight: 600; transition: filter .15s, background .15s;
 }
-.mabc-btn-sec { background: #f1f5f9; color: #334155; }
-.mabc-btn-sec:hover { background: #e2e8f0; }
-.mabc-btn-enc { background: #fee2e2; color: #b91c1c; margin-left: auto; }
+.mabc-btn-sec { background: var(--mc-azul-palido); color: var(--mc-marinho-2); }
+.mabc-btn-sec:hover { background: #d3e6fa; }
+.mabc-btn-sec.compacto { height: 36px; padding: 0 12px; font-size: 13.5px; }
+.mabc-btn-enc { height: 36px; padding: 0 14px; font-size: 13.5px; background: #fee2e2; color: #b91c1c; margin-left: auto; }
 .mabc-btn-enc:hover { background: #fecaca; }
-.mabc-painel > .mabc-btn-sec { width: 100%; margin-top: 10px; }
+.mabc-painel > .mabc-btn-sec { width: 100%; margin-top: 8px; }
 
 /* Botão de destaque "Ir Agora" */
 .mabc-btn-ir {
     display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
-    height: 54px; margin-top: 10px; border: none; border-radius: 16px; cursor: pointer;
+    height: 52px; margin-top: 10px; border: none; border-radius: 16px; cursor: pointer;
     font: inherit; font-size: 18px; font-weight: 800; letter-spacing: .01em; color: #fff;
-    background: linear-gradient(135deg, #22c55e, #15803d);
-    box-shadow: 0 8px 20px rgba(21, 128, 61, 0.38);
+    background: linear-gradient(135deg, #2a6fc2, var(--mc-marinho));
+    box-shadow: 0 8px 20px rgba(11, 37, 69, 0.35);
     transition: transform .12s, filter .15s;
 }
-.mabc-btn-ir:hover { filter: brightness(1.07); }
+.mabc-btn-ir:hover { filter: brightness(1.1); }
 .mabc-btn-ir:active { transform: scale(.98); }
 .mabc-btn-ir:disabled { background: #94a3b8; box-shadow: none; cursor: default; }
 
 /* Inputs */
-.mabc-campos { display: flex; align-items: center; gap: 8px; }
+.mabc-campos { display: flex; align-items: center; gap: 6px; }
 .mabc-trilho {
-    width: 20px; height: 96px; display: flex; flex-direction: column; align-items: center;
-    justify-content: space-between; padding: 14px 0 12px; box-sizing: border-box; flex-shrink: 0;
+    width: 18px; height: 86px; display: flex; flex-direction: column; align-items: center;
+    justify-content: space-between; padding: 12px 0 10px; box-sizing: border-box; flex-shrink: 0;
 }
-.mabc-bolinha { width: 12px; height: 12px; border-radius: 50%; border: 3px solid #2563eb; box-sizing: border-box; }
-.mabc-linha { flex: 1; border-left: 2px dotted #94a3b8; margin: 4px 0; }
-.mabc-pino { color: #dc2626; display: flex; }
-.mabc-inputs { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.mabc-bolinha { width: 11px; height: 11px; border-radius: 50%; border: 3px solid var(--mc-azul); box-sizing: border-box; }
+.mabc-linha { flex: 1; border-left: 2px dotted var(--mc-azul-claro); margin: 3px 0; }
+.mabc-pino { color: var(--mc-marinho); display: flex; }
+.mabc-inputs { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .mabc-campo { position: relative; }
 .mabc-input {
-    width: 100%; height: 44px; box-sizing: border-box; padding: 0 14px;
-    font-size: 16px; font-family: inherit; color: #0f172a;
-    background: #f1f5f9; border: 1px solid transparent; border-radius: 12px; outline: none;
+    width: 100%; height: 40px; box-sizing: border-box; padding: 0 12px;
+    font-size: 16px; font-family: inherit; color: var(--mc-marinho);
+    background: rgba(228, 240, 252, 0.78); border: 1px solid transparent; border-radius: 14px; outline: none;
     transition: background .15s, border-color .15s, box-shadow .15s;
 }
-.mabc-input::placeholder { color: #94a3b8; }
-.mabc-input:focus { background: #fff; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18); }
-.mabc-input.definido { background: #f0fdf4; border-color: #bbf7d0; }
-.mabc-input.definido:focus { background: #fff; border-color: #3b82f6; }
+.mabc-input.com-acao { padding-right: 42px; }
+.mabc-input::placeholder { color: #7f98b5; }
+.mabc-input:focus { background: #fff; border-color: var(--mc-azul); box-shadow: 0 0 0 3px rgba(61, 139, 217, 0.22); }
+.mabc-input.definido { background: rgba(214, 233, 252, 0.95); border-color: var(--mc-azul-claro); }
+.mabc-input.definido:focus { background: #fff; border-color: var(--mc-azul); }
+
+/* Ícone "Meu local" dentro do input de Origem */
+.mabc-input-acao {
+    position: absolute; right: 4px; top: 4px; width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; border-radius: 10px; background: transparent; color: var(--mc-marinho-2); cursor: pointer;
+    transition: background .15s;
+}
+.mabc-input-acao:hover { background: rgba(143, 195, 245, 0.4); }
+.mabc-input-acao.carregando { animation: mabc-pisca 1s ease-in-out infinite; }
+@keyframes mabc-pisca { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 
 /* Dropdown de sugestões */
 .mabc-dropdown {
     position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 10;
-    margin: 0; padding: 6px; list-style: none; max-height: 300px; overflow-y: auto;
-    background: #fff; border-radius: 14px;
-    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22), 0 0 0 1px rgba(15, 23, 42, 0.05);
+    margin: 0; padding: 6px; list-style: none; max-height: 280px; overflow-y: auto;
+    background: rgba(255, 255, 255, 0.98); border-radius: 16px;
+    box-shadow: 0 12px 32px rgba(11, 37, 69, 0.22), 0 0 0 1px rgba(11, 37, 69, 0.05);
 }
-.mabc-item { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 10px; cursor: pointer; }
-.mabc-item.ativo { background: #eff6ff; }
+.mabc-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 12px; cursor: pointer; }
+.mabc-item.ativo { background: var(--mc-azul-palido); }
 .mabc-item-icone {
-    width: 32px; height: 32px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
-    border-radius: 50%; background: #f1f5f9; color: #64748b;
+    width: 30px; height: 30px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; background: var(--mc-azul-palido); color: var(--mc-marinho-2);
 }
-.mabc-item.ativo .mabc-item-icone { background: #dbeafe; color: #2563eb; }
+.mabc-item.ativo .mabc-item-icone { background: var(--mc-marinho); color: #fff; }
 .mabc-item-textos { display: flex; flex-direction: column; min-width: 0; }
 .mabc-item-titulo { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mabc-item-detalhes { font-size: 12px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mabc-item-detalhes { font-size: 12px; color: var(--mc-texto-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Avisos */
-.mabc-aviso { margin-top: 10px; padding: 8px 10px; font-size: 12.5px; line-height: 1.4; color: #5b21b6; background: #f5f3ff; border-radius: 10px; }
-.mabc-aviso-zona { margin-top: 10px; padding: 8px 10px; font-size: 12.5px; line-height: 1.4; color: #991b1b; background: #fee2e2; border-radius: 10px; }
-.mabc-erro { margin-top: 10px; padding: 8px 10px; font-size: 13px; color: #92400e; background: #fef3c7; border-radius: 10px; }
-.mabc-dica { margin-top: 10px; font-size: 12px; color: #94a3b8; text-align: center; }
-.mabc-dica kbd { padding: 1px 6px; font-family: inherit; font-size: 11px; color: #475569; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 5px; }
+.mabc-aviso { margin-top: 8px; padding: 7px 10px; font-size: 12.5px; line-height: 1.4; color: #5b21b6; background: #f5f3ff; border-radius: 12px; }
+.mabc-aviso-zona { margin-top: 8px; padding: 7px 10px; font-size: 12.5px; line-height: 1.4; color: #991b1b; background: #fee2e2; border-radius: 12px; }
+.mabc-erro { margin-top: 8px; padding: 7px 10px; font-size: 12.5px; line-height: 1.4; color: #92400e; background: #fef3c7; border-radius: 12px; }
 .mabc-selo { padding: 2px 8px; font-size: 11px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; color: #92400e; background: #fef3c7; border-radius: 999px; }
 
 /* Opções de rota */
-.mabc-opcoes { display: flex; gap: 8px; margin-top: 10px; overflow-x: auto; padding-bottom: 2px; }
+.mabc-opcoes { display: flex; gap: 6px; margin-top: 8px; overflow-x: auto; padding-bottom: 2px; }
 .mabc-opcao {
-    flex: 1 0 auto; min-width: 104px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-    padding: 8px 12px; text-align: left; font: inherit; color: #334155; background: #f8fafc;
-    border: 2px solid transparent; border-radius: 12px; cursor: pointer; transition: background .15s, border-color .15s;
+    flex: 1 0 auto; min-width: 100px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 7px 11px; text-align: left; font: inherit; color: var(--mc-marinho-2); background: rgba(228, 240, 252, 0.7);
+    border: 2px solid transparent; border-radius: 14px; cursor: pointer; transition: background .15s, border-color .15s;
 }
-.mabc-opcao:hover { background: #f1f5f9; }
-.mabc-opcao.ativo { background: #eff6ff; border-color: #2563eb; }
-.mabc-opcao-tempo { font-size: 16px; font-weight: 700; color: #0f172a; }
-.mabc-opcao-dist { font-size: 12.5px; color: #64748b; }
-.mabc-tag { margin-top: 2px; padding: 1px 7px; font-size: 10.5px; font-weight: 700; color: #166534; background: #dcfce7; border-radius: 999px; }
+.mabc-opcao:hover { background: var(--mc-azul-palido); }
+.mabc-opcao.ativo { background: #fff; border-color: var(--mc-marinho-2); }
+.mabc-opcao-tempo { font-size: 15.5px; font-weight: 700; color: var(--mc-marinho); }
+.mabc-opcao-dist { font-size: 12.5px; color: var(--mc-texto-2); }
+.mabc-tag { margin-top: 2px; padding: 1px 7px; font-size: 10.5px; font-weight: 700; color: var(--mc-marinho); background: var(--mc-azul-claro); border-radius: 999px; }
 .mabc-tag.desvio { color: #92400e; background: #fef3c7; }
 
 /* Rótulos de tempo sobre as rotas no mapa */
 .mabc-rotulo-rota { background: none; border: none; }
 .mabc-rotulo-rota span {
     position: absolute; transform: translate(-50%, -50%); white-space: nowrap; cursor: pointer;
-    padding: 4px 10px; font: 700 13px system-ui, sans-serif; color: #475569; background: #fff;
-    border-radius: 999px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.3);
+    padding: 4px 10px; font: 700 13px system-ui, sans-serif; color: var(--mc-marinho-2); background: #fff;
+    border-radius: 999px; box-shadow: 0 2px 8px rgba(11, 37, 69, 0.3);
 }
-.mabc-rotulo-rota span.sel { color: #fff; background: #2563eb; }
+.mabc-rotulo-rota span.sel { color: #fff; background: var(--mc-marinho); }
 
 /* Itinerário */
 .mabc-alca { display: none; align-self: center; width: 100%; padding: 0 0 8px; border: none; background: none; cursor: pointer; justify-content: center; }
-.mabc-alca span { width: 40px; height: 4px; border-radius: 4px; background: #cbd5e1; }
-.mabc-itin-topo { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.mabc-alca span { width: 40px; height: 4px; border-radius: 4px; background: var(--mc-azul-claro); }
+.mabc-itin-topo { display: flex; align-items: center; gap: 2px; margin-bottom: 6px; }
 .mabc-itin-titulo { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; }
 .mabc-itin-titulo span:not(.mabc-seta-txt) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mabc-seta-txt { color: #94a3b8; flex-shrink: 0; }
-.mabc-resumo { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 10px 12px; background: #f8fafc; border-radius: 12px; }
-.mabc-resumo-tempo { font-size: 22px; font-weight: 700; }
-.mabc-resumo-dist { font-size: 14px; color: #64748b; }
-.mabc-carregando { margin-top: 12px; font-size: 14px; color: #64748b; text-align: center; }
-.mabc-passos { list-style: none; margin: 12px 0 0; padding: 0; overflow-y: auto; flex: 1 1 auto; min-height: 0; overscroll-behavior: contain; }
-.mabc-passo { display: flex; align-items: center; gap: 12px; padding: 9px 6px; border-radius: 12px; }
-.mabc-passo + .mabc-passo { border-top: 1px solid #f1f5f9; }
-.mabc-passo.ativo { background: #eff6ff; }
+.mabc-seta-txt { color: var(--mc-azul); flex-shrink: 0; }
+.mabc-resumo { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-top: 8px; padding: 9px 12px; background: rgba(228, 240, 252, 0.7); border-radius: 14px; }
+.mabc-resumo-tempo { font-size: 21px; font-weight: 700; color: var(--mc-marinho); }
+.mabc-resumo-dist { font-size: 14px; color: var(--mc-texto-2); }
+.mabc-carregando { margin-top: 12px; font-size: 14px; color: var(--mc-texto-2); text-align: center; }
+.mabc-passos { list-style: none; margin: 10px 0 0; padding: 0; overflow-y: auto; flex: 1 1 auto; min-height: 0; overscroll-behavior: contain; }
+.mabc-passo { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: 14px; }
+.mabc-passo + .mabc-passo { border-top: 1px solid rgba(11, 37, 69, 0.06); }
+.mabc-passo.ativo { background: var(--mc-azul-palido); }
 .mabc-passo-icone {
-    width: 36px; height: 36px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
-    border-radius: 50%; background: #f1f5f9; color: #334155;
+    width: 34px; height: 34px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; background: var(--mc-azul-palido); color: var(--mc-marinho-2);
 }
 .mabc-passo-textos { display: flex; flex-direction: column; min-width: 0; }
 .mabc-passo-titulo { font-size: 14px; font-weight: 600; line-height: 1.3; }
-.mabc-passo-detalhe { font-size: 12.5px; color: #64748b; }
+.mabc-passo-detalhe { font-size: 12.5px; color: var(--mc-texto-2); }
 
 /* Navegação */
-.mabc-nav { width: min(390px, calc(100% - 104px)); } /* deixa espaço para o botão 2D/3D */
-.mabc-nav-banner { display: flex; align-items: center; gap: 14px; padding: 12px; color: #fff; background: #1d4ed8; border-radius: 14px; }
-.mabc-nav-banner.chegou { background: #15803d; }
-.mabc-nav-icone { width: 48px; height: 48px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.18); border-radius: 12px; }
+.mabc-nav { width: min(372px, calc(100% - 100px)); } /* deixa espaço para o botão 2D/3D */
+.mabc-nav-banner { display: flex; align-items: center; gap: 12px; padding: 11px; color: #fff; background: linear-gradient(135deg, var(--mc-marinho-2), var(--mc-marinho)); border-radius: 16px; }
+.mabc-nav-banner.chegou { background: linear-gradient(135deg, #1f8a5b, #14633f); }
+.mabc-nav-icone { width: 46px; height: 46px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: rgba(143, 195, 245, 0.25); border-radius: 13px; }
 .mabc-nav-dist { font-size: 13px; opacity: .9; }
-.mabc-nav-texto { font-size: 17px; font-weight: 700; line-height: 1.25; }
-.mabc-nav-resumo { display: flex; align-items: baseline; gap: 10px; margin-top: 10px; font-size: 14px; color: #64748b; }
-.mabc-nav-resumo strong { font-size: 18px; color: #0f172a; }
-.mabc-fora { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding: 8px 10px; font-size: 13px; color: #92400e; background: #fef3c7; border-radius: 10px; }
-.mabc-fora button { border: none; border-radius: 8px; padding: 6px 10px; font: inherit; font-weight: 600; color: #fff; background: #d97706; cursor: pointer; white-space: nowrap; }
-.mabc-nav-acoes { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.mabc-nav-texto { font-size: 16.5px; font-weight: 700; line-height: 1.25; }
+.mabc-nav-resumo { display: flex; align-items: baseline; gap: 10px; margin-top: 8px; font-size: 14px; color: var(--mc-texto-2); }
+.mabc-nav-resumo strong { font-size: 18px; color: var(--mc-marinho); }
+.mabc-fora { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding: 7px 10px; font-size: 13px; color: #92400e; background: #fef3c7; border-radius: 12px; }
+.mabc-fora button { border: none; border-radius: 9px; padding: 6px 10px; font: inherit; font-weight: 600; color: #fff; background: #d97706; cursor: pointer; white-space: nowrap; }
+.mabc-nav-acoes { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .mabc-nav .mabc-passos { max-height: 38vh; }
 
 /* Alerta de bloqueio */
@@ -1922,24 +2175,24 @@ const CSS = `
     position: absolute; bottom: calc(28px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%);
     width: min(560px, calc(100% - 32px)); box-sizing: border-box; display: flex; align-items: center; gap: 12px;
     padding: 14px 16px; font-size: 14px; color: #991b1b; background: #fee2e2;
-    border: 2px solid #ef4444; border-radius: 14px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    border: 2px solid #ef4444; border-radius: 16px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
 
-/* Seta direcional do motorista (o Leaflet posiciona a raiz; giramos só o filho .mabc-seta-rot) */
+/* Seta do motorista (o Leaflet posiciona a raiz; giramos só o filho .mabc-seta-rot) */
 .mabc-seta { background: none; border: none; }
 .mabc-seta-wrap { position: relative; width: 44px; height: 44px; }
-.mabc-seta-pulso { position: absolute; inset: 6px; border-radius: 50%; background: rgba(37, 99, 235, 0.3); animation: mabc-pulso 1.8s ease-out infinite; }
+.mabc-seta-pulso { position: absolute; inset: 6px; border-radius: 50%; background: rgba(61, 139, 217, 0.35); animation: mabc-pulso 1.8s ease-out infinite; }
 .mabc-seta-rot { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; transition: transform .35s ease-out; will-change: transform; }
 .mabc-seta-rot svg { width: 36px; height: 36px; filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45)); }
 @keyframes mabc-pulso { 0% { transform: scale(.6); opacity: .9; } 100% { transform: scale(1.7); opacity: 0; } }
 
 /* Mobile: busca/navegação no topo, itinerário como "bottom sheet" */
 @media (max-width: 640px) {
-    .mabc-painel { left: 8px; right: 8px; width: auto; top: calc(8px + env(safe-area-inset-top, 0px)); border-radius: 18px; }
+    .mabc-painel, .mabc-itin { left: 8px; right: 8px; width: auto; top: calc(8px + env(safe-area-inset-top, 0px)); border-radius: 22px; }
     .mabc-nav { width: auto; max-height: calc(100% - 120px); }
     .mabc-itin {
         top: auto; bottom: calc(26px + env(safe-area-inset-bottom, 0px)); /* deixa o crédito do OSM visível */
-        max-height: 58%; border-radius: 22px;
+        max-height: 58%; border-radius: 24px;
     }
     .mabc-alca { display: flex; }
     .mabc-nav .mabc-passos { max-height: 30vh; }
