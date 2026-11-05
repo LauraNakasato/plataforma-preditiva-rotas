@@ -131,13 +131,35 @@ Acesse pelo navegador do celular: `http://<SEU-IP-LOCAL>:3000`.
 
 ### 2. Serviço de Alertas (alert_service)
 
-1. Configure as variáveis de ambiente:
-   ```bash
-   cd alert_service
-   cp .env.example .env
-   ```
-2. Inicie o serviço de monitoramento:
-   ```bash
-   py alert_service/main.py
-   ```
-   *(Ou para teste simulado imediato: `py alert_service/main.py --once --simular`)*
+Serviço em Python para monitorar as estações do CEMADEN, disparar alertas de alagamento para o Supabase e gerar relatórios visuais em PDF (`alert_service/relatorio_alertas.pdf`).
+
+#### 2.1. Instalação e Configuração
+```bash
+cd alert_service
+
+# Copiar arquivo de variáveis de ambiente
+cp .env.example .env
+
+# Instalar dependências com Poetry (Recomendado)
+poetry install
+
+# Ou com pip nativo:
+pip install -r requirements.txt
+```
+
+#### 2.2. Comandos de Execução
+
+| Objetivo | Comando com Poetry | Comando com Python Nativo |
+|---|---|---|
+| **Loop Contínuo (Padrão a cada 10 min)** | `poetry run python main.py` | `py main.py` |
+| **Rodada Única de Teste (`--once`)** | `poetry run python main.py --once` | `py main.py --once` |
+| **Simulação de Chuva e Alertas (`--simular`)** | `poetry run python main.py --once --simular` | `py main.py --once --simular` |
+| **Alterar Intervalo (ex: a cada 5 min)** | `poetry run python main.py --intervalo 5` | `py main.py --intervalo 5` |
+| **Alterar Raio de Influência (ex: 5 km)** | `poetry run python main.py --once --raio 5.0` | `py main.py --once --raio 5.0` |
+| **Forçar Modo Mock no Supabase** | `poetry run python main.py --once --mock-supabase` | `py main.py --once --mock-supabase` |
+| **Caminho Personalizado do PDF** | `poetry run python main.py --once --pdf-path relatorio.pdf` | `py main.py --once --pdf-path relatorio.pdf` |
+| **Executar Sem Gerar PDF** | `poetry run python main.py --once --sem-pdf` | `py main.py --once --sem-pdf` |
+| **Executar com `.env` Customizado** | `poetry run python main.py --env-file .env.prod` | `py main.py --env-file .env.prod` |
+
+*Para mais detalhes dos parâmetros e estrutura do serviço, consulte o [README do alert_service](alert_service/README.md).*
+

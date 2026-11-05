@@ -344,3 +344,4 @@ def gerar_relatorio_pdf(resultado_rodada, caminho_saida=None):
     # Constrói o PDF
     doc.build(story)
     return os.path.abspath(caminho_saida)
+
