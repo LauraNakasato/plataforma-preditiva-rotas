@@ -1,0 +1,839 @@
+{
+  "swagger": "2.0",
+  "info" : {
+    "description" : "<h1>PED<\/h1>",
+    "version" : "2.0.2",
+    "title" : "Plataforma de Entrega de Dados (PED)"
+  },
+  "basePath" : "/PED/rest/",
+  "schemes" : [],
+  "tags" : [
+    {
+      "name" : "Acumulados"
+    }
+    ,
+    {
+      "name" : "Conversor de Dados"
+    }
+    ,
+    {
+      "name" : "Dados Ambientais"
+    }
+    ,
+    {
+      "name" : "Dados Ambientais"
+    }
+    ,
+    {
+      "name" : "Dados Cadastrais da Rede Observacional"
+    }
+    ,
+    {
+      "name" : "Paginação dos Dados"
+    }
+    ,
+    {
+      "name" : "Requisições Agendadas"
+    }
+    ,
+    {
+      "name" : "Tipos de Estações"
+    }
+  ],
+  "definitions" : {
+  },
+  "paths": {
+    "\/controle-agendamento/agendamentos" : {
+      "get" : {
+        "tags" : [ "Requisições Agendadas" ],
+        "description" : "Webservice para recuperação das requisições agendadas do usuário, dado um conjunto de parâmetros.",
+        "operationId" : "getSchedules",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          },
+          {
+            "name" : "statusreq",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Status das requisições agendadas. Valores possíveis: PENDENTE, CONCLUIDA, REJEITADA, EXPIRADA."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Lista com as requisições agendadas pelo usuário, correspondente ao parâmetro de busca informado, ordenada por ordem cronológica de criação do agendamento.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"dtCreate":1636637486000,"dtLastUpdate":1636637486000,"id":1,"link":null,"parameters":"datainicio=201204020000&datafim=202104030000&rede=11&codestacao=351050004A&uf=SP&codibge=3510500&tipoestacao=1&sensor=10&formato=Json","service":{"id":2,"method":"GET","path":"\/PED\/rest\/controle-agendamento\/pcds-dados-historicos","description":"Webservice para agendamento de requisição por dados ambientais históricos das PCDs, dado um conjunto de parâmetros.","system":{"id":2,"name":"SWS","description":"Sistema de WebServices"}},"status":{"id":1,"description":"PENDENTE"}}]
+            },
+            "description" : "Lista com as requisições agendadas pelo usuário, correspondente ao parâmetro de busca informado, ordenada por ordem cronológica de criação do agendamento."
+          }
+        }
+      }
+    },
+    "\/controle-agendamento/pcds-dados-historicos" : {
+      "get" : {
+        "tags" : [ "Requisições Agendadas" ],
+        "description" : "Webservice para agendamento de requisição por dados ambientais históricos das PCDs, dado um conjunto de parâmetros. Obtenha o link para o arquivo compactado acessando o webservice '/agendamentos'. O tempo estimado para o processamento dos dados pode variar de alguns minutos a até três dias.",
+        "operationId" : "getPcdsHistoricalData",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "arquivo",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados do arquivo. Valores possíveis: CSV, JSON, XML, CUSTOMIZADO (padrão elaborado pelo Cemaden). Formato padrão: CUSTOMIZADO."
+          },
+          {
+            "name" : "codestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código da estação no Cemaden. Ex.: 292740804A."
+          },
+          {
+            "name" : "codibge",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "datafim",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data final do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202102010000."
+          },
+          {
+            "name" : "datainicio",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data inicial do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202101010000."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída do webservice. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          },
+          {
+            "name" : "rede",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Identificador da rede observacional. Redes homologadas: 11 (CEMADEN). Ex.: 11."
+          },
+          {
+            "name" : "sensor",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do sensor da estação no Cemaden. Ex.: 10."
+          },
+          {
+            "name" : "tipoestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do tipo de estação no Cemaden. Ex.: 1."
+          },
+          {
+            "name" : "uf",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Unidade Federativa (UF). Ex.: BA."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Identificador da requisiçao que foi agendada e será escalonada quando possível.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : {"id": 50}
+            },
+            "description" : "Identificador da requisiçao que foi agendada e será escalonada quando possível."
+          }
+        }
+      }
+    },
+    "\/controle-paginacao/pagina" : {
+      "get" : {
+        "tags" : [ "Paginação dos Dados" ],
+        "description" : "Webservice para recuperação da próxima página. Utilizado em conjunto com webservices cuja resposta é realizada de forma paginada. Observação: O scroll foi configurado para ter duração de 30 segundos.",
+        "operationId" : "getPage",
+        "produces" : [ "application/json" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "scroll",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Identificador da paginação, recuperado através de um webservice que retorne os dados de forma paginada."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "JSON contendo o scroll da paginação e os dados da página corrente, correspondente ao parâmetro de busca informado. O formato dos dados da página varia de acordo com o tipo de dado que foi paginado.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : {"data":[{"@timestamp":"2021-11-30T12:00:00.340Z","@version":"1","descricao":"vazão","descricao_completa":"Vazão","id_sensor":30,"unidade_descricao":"metros cúbicos por segundo","unidade_sigla":"m3\/s"},{"@timestamp":"2021-11-30T12:00:00.340Z","@version":"1","descricao":"temperatura_ar","descricao_completa":"Temperatura do Ar","id_sensor":60,"unidade_descricao":"graus Celsius","unidade_sigla":"��C"}],"scroll": "FGluY2x1ZGVfY29udGV4dF91dWlkDnF1ZXJ5VGhlbkZldGNoAxZya2xdw=="}
+            },
+            "description" : "JSON contendo o scroll da paginação e os dados da página corrente, correspondente ao parâmetro de busca informado. O formato dos dados da página varia de acordo com o tipo de dado que foi paginado."
+          }
+        }
+      }
+    },
+    "\/modelo/formatos" : {
+      "get" : {
+        "tags" : [ "Conversor de Dados" ],
+        "description" : "Webservice para recuperação dos possíveis formatos de respostas dos webservices disponíveis no sistema.",
+        "operationId" : "getFormats",
+        "produces" : [ "application/json" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "JSON com os possíveis formatos de respostas dos webservices disponíveis no sistema.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : ["CSV","JSON","XML"]
+            },
+            "description" : "JSON com os possíveis formatos de respostas dos webservices disponíveis no sistema."
+          }
+        }
+      }
+    },
+    "\/pcds-acum/acumulados-historicos" : {
+      "get" : {
+        "tags" : [ "Acumulados" ],
+        "description" : "Webservice para recuperação dos acumulados históricos de uma estação, dado um conjunto de parâmetros, incluindo a data de referência para o cálculo. Dessa forma, os acumulados históricos são aqueles gerados a partir do parâmetro \"data\". Como exemplo, se o retorno contiver acc1hr=5.0, significa que, na data/hora informada, o acumulado de 1h era de 5mm.",
+        "operationId" : "getAccumHist",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "codestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código da estação no Cemaden. Ex.: 292740804A."
+          },
+          {
+            "name" : "codibge",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "data",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data a partir da qual serão calculados os acumulados, no formato aaaaMMddHHmm (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202101010000."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          },
+          {
+            "name" : "idestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador da estação no Cemaden. Ex.: 3283."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Acumulados (1h, 3h, 6h, 12h, 24h, 48h, 72h, 96h, 120h) históricos de uma estação, correspondentes aos parâmetros de busca informados.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"acc120hr":0.0,"acc12hr":0.0,"acc1hr":0.0,"acc24hr":0.0,"acc3hr":0.0,"acc48hr":0.0,"acc6hr":0.0,"acc72hr":0.0,"acc96hr":0.0,"codestacao":"352210903A","codibge":3522109,"id_estacao":3855}]
+            },
+            "description" : "Acumulados (1h, 3h, 6h, 12h, 24h, 48h, 72h, 96h, 120h) históricos de uma estação, correspondentes aos parâmetros de busca informados."
+          }
+        }
+      }
+    },
+    "\/pcds-acum/acumulados-recentes" : {
+      "get" : {
+        "tags" : [ "Acumulados" ],
+        "description" : "Webservice para recuperação dos acumulados recentes de uma estação, dado um conjunto de parâmetros. Os acumulados recentes são aqueles gerados a partir dos últimos dados enviados pela estação.",
+        "operationId" : "getAccum",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "codestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código da estação no Cemaden. Ex.: 292740804A."
+          },
+          {
+            "name" : "codibge",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          },
+          {
+            "name" : "idestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador da estação no Cemaden. Ex.: 3283."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Acumulados (1h, 3h, 6h, 12h, 24h, 48h, 72h, 96h, 120h) recentes de uma estação, correspondentes aos parâmetros de busca informados.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"acc120hr":14.96,"acc12hr":0.0,"acc1hr":0.0,"acc24hr":0.0,"acc3hr":0.0,"acc48hr":0.6,"acc6hr":0.0,"acc72hr":14.96,"acc96hr":14.96,"codestacao":"292740804A","codibge":2927408,"datahora":"2021-11-30T16:54:14.720328","id_estacao":3283}]
+            },
+            "description" : "Acumulados (1h, 3h, 6h, 12h, 24h, 48h, 72h, 96h, 120h) recentes de uma estação, correspondentes aos parâmetros de busca informados."
+          }
+        }
+      }
+    },
+    "\/pcds-cadastro/cidades" : {
+      "get" : {
+        "tags" : [ "Dados Cadastrais da Rede Observacional" ],
+        "description" : "Webservice para recuperação das cidades que possuem estações pertencentes à rede observacional do Cemaden, dado um UF.",
+        "operationId" : "getCities",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          },
+          {
+            "name" : "uf",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Unidade Federativa (UF). Ex.: BA."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Lista com as cidades que possuem estações pertencentes à rede observacional do Cemaden, correspondente ao parâmetro de busca informado, ordenada por ordem alfabética de acordo com o nome da cidade.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"cidade":"BRASILÉIA","codibge":1200104},{"cidade":"JORDÃO","codibge":1200328},{"cidade":"RIO BRANCO","codibge":1200401},{"cidade":"XAPURI","codibge":1200708}]
+            },
+            "description" : "Lista com as cidades que possuem estações pertencentes à rede observacional do Cemaden, correspondente ao parâmetro de busca informado, ordenada por ordem alfabética de acordo com o nome da cidade."
+          }
+        }
+      }
+    },
+    "\/pcds-cadastro/dados-cadastrais" : {
+      "get" : {
+        "tags" : [ "Dados Cadastrais da Rede Observacional" ],
+        "description" : "Webservice para recuperação dos dados cadastrais das PCDs pertencentes à rede observacional do Cemaden, dado um conjunto de parâmetros.",
+        "operationId" : "getRegistrationData",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "codestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código da estação no Cemaden. Ex.: 292740804A."
+          },
+          {
+            "name" : "codibge",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          },
+          {
+            "name" : "tipoestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do tipo de estação no Cemaden. Ex.: 1."
+          },
+          {
+            "name" : "uf",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Unidade Federativa (UF). Ex.: BA."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Lista com os dados cadastrais das PCDs pertencentes à rede observacional do Cemaden, correspondente aos parâmetros de busca informados, ordenada por ordem alfabética decrescente de acordo com o código da estação.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"altitude":0.0,"cidade":"XAPURI","codestacao":"120070801A","codibge":1200708,"cota_alerta":null,"cota_atencao":null,"cota_transbordamento":null,"data_instalacao":"2018-08-14 15:18:09.709","dh_cadastro":"2018-08-14 15:18:09.709","dh_inicio_inativo":"2021-10-18 10:15:23.686","dh_ultima_remessa":"2021-11-30 11:10:25.000","id_estacao":9675,"id_rede":11,"id_tipoestacao":1,"latitude":-10.665833,"longitude":-68.485844,"nome":"Cageacre","offset":null,"rede_sigla":"CEMADEN","tipoestacao_descricao":"Pluviométrica","uf":"AC"}]
+            },
+            "description" : "Lista com os dados cadastrais das PCDs pertencentes à rede observacional do Cemaden, correspondente aos parâmetros de busca informados, ordenada por ordem alfabética decrescente de acordo com o código da estação."
+          }
+        }
+      }
+    },
+    "\/pcds-cadastro/estacoes" : {
+      "get" : {
+        "tags" : [ "Dados Cadastrais da Rede Observacional" ],
+        "description" : "Webservice para recuperação das estações pertencentes à rede observacional do Cemaden, dado um código de município no IBGE.",
+        "operationId" : "getPCD",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "codibge",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Lista com as estações pertencentes à rede observacional do Cemaden, correspondente ao parâmetro de busca informado, ordenada por ordem alfabética de acordo com o nome da estação.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"codestacao":"354980503A","id_tipoestacao":1,"nome":"Eldorado"},{"codestacao":"354980501A","id_tipoestacao":1,"nome":"Jardim Maria Candida"},{"codestacao":"354980502A","id_tipoestacao":1,"nome":"Jardim Nazareth"},{"codestacao":"354980504A","id_tipoestacao":1,"nome":"São Francisco"}]
+            },
+            "description" : "Lista com as estações pertencentes à rede observacional do Cemaden, correspondente ao parâmetro de busca informado, ordenada por ordem alfabética de acordo com o nome da estação."
+          }
+        }
+      }
+    },
+    "\/pcds-tipo-estacao/sensores" : {
+      "get" : {
+        "tags" : [ "Tipos de Estações" ],
+        "description" : "Webservice para recuperação dos dados de um determinado tipo de estação, dado o identificador do tipo de estação no Cemaden.",
+        "operationId" : "getSensors",
+        "produces" : [ "application/json" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "tipoestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do tipo de estação no Cemaden. Ex.: 1."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "JSON contendo os dados do tipo de estação solicitada, correspondente ao parâmetro de busca informado.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"tipoestacao": 1, "sensor": [{"sensor": 10, "sensordescricao": "Chuva"}, {"sensor": 240, "sensordescricao": "Intensidade da Precipitação"}], "tipoestacaodescricao": "Pluviométrica"}]
+            },
+            "description" : "JSON contendo os dados do tipo de estação solicitada, correspondente ao parâmetro de busca informado."
+          }
+        }
+      }
+    },
+    "\/pcds/dados_pcd" : {
+      "get" : {
+        "tags" : [ "Dados Ambientais" ],
+        "description" : "Webservice para recuperação dos dados ambientais das PCDs, dado um conjunto de parâmetros, incluindo um período máximo de até 30 dias. Oferece compatibilidade com o webservice \"dados_pcd\" do antigo catálogo de serviços.",
+        "operationId" : "getPcdData",
+        "produces" : [ "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "codigo",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Código da estação no Cemaden. Ex.: 292740804A."
+          },
+          {
+            "name" : "fim",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data final do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202102010000."
+          },
+          {
+            "name" : "inicio",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data inicial do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202101010000."
+          },
+          {
+            "name" : "rede",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Identificador da rede observacional. Redes homologadas: 11 (CEMADEN). Ex.: 11."
+          },
+          {
+            "name" : "sensor",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do sensor da estação no Cemaden. Ex.: 10."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Lista com os dados ambientais das PCDs, correspondente aos parâmetros de busca informados, ordenada por datahora de forma crescente.",
+"type" : "string"
+            },
+            "description" : "Lista com os dados ambientais das PCDs, correspondente aos parâmetros de busca informados, ordenada por datahora de forma crescente."
+          }
+        }
+      }
+    },
+    "\/pcds/dados_rede" : {
+      "get" : {
+        "tags" : [ "Dados Ambientais" ],
+        "description" : "Webservice para recuperação dos dados ambientais das PCDs, dado um conjunto de parâmetros, incluindo um período máximo de até 1 dia. Oferece compatibilidade com o webservice \"dados_rede\" do antigo catálogo de serviços.",
+        "operationId" : "getObservationalNetData",
+        "produces" : [ "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "fim",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data final do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202101020000."
+          },
+          {
+            "name" : "inicio",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data inicial do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202101010000."
+          },
+          {
+            "name" : "municipio",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "rede",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador da rede observacional. Redes homologadas: 11 (CEMADEN). Ex.: 11."
+          },
+          {
+            "name" : "sensor",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do sensor da estação no Cemaden. Ex.: 10."
+          },
+          {
+            "name" : "tipo_pcd",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do tipo de estação no Cemaden. Ex.: 1."
+          },
+          {
+            "name" : "uf",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Unidade Federativa (UF). Ex.: BA."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Lista com os dados ambientais das PCDs, correspondente aos parâmetros de busca informados, ordenada por datahora de forma crescente.",
+"type" : "string"
+            },
+            "description" : "Lista com os dados ambientais das PCDs, correspondente aos parâmetros de busca informados, ordenada por datahora de forma crescente."
+          }
+        }
+      }
+    },
+    "\/pcds/pcds-dados-atualizado-pg" : {
+      "get" : {
+        "tags" : [ "Dados Ambientais" ],
+        "description" : "Webservice para recuperação das atualizações nos dados ambientais das PCDs de forma paginada, dado um conjunto de parâmetros. Observação: O scroll foi configurado para ter duração de 30 segundos.",
+        "operationId" : "getPcdsDataUpdatedPg",
+        "produces" : [ "application/json" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "atualizado",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data inicial do período de atualizações no formato aaaaMMddHHmm (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202101010000."
+          },
+          {
+            "name" : "rede",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Identificador da rede observacional. Redes homologadas: 11 (CEMADEN). Ex.: 11."
+          },
+          {
+            "name" : "scroll",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador da paginação, recuperado após a solicitação da primeira página."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "JSON contendo o scroll da paginação e as atualizações de medições de chuva da página corrente, correspondente aos parâmetros de busca informados, sem ordenação.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : {"data":[{"atualizado":"2022-05-03 20:08:48.503","cidade":"BREJÃO","codestacao":"260240701C","datahora":"2015-07-25 16:30","id_sensor":10,"latitude":-9.046416,"longitude":-36.569472,"nome":"BREJAO","offset":null,"qualificacao":"0004","uf":"PE","valor":13.0},{"atualizado":"2020-12-03 03:59:22.754","cidade":"SANTANA DO ARAGUAIA","codestacao":"150670801A","datahora":"2017-12-16 19:10","id_sensor":240,"latitude":-9.334535,"longitude":-50.343572,"nome":"Centro","offset":null,"qualificacao":"0004","uf":"PA","valor":21.5845824411}],"scroll": "FGluY2x1ZGVfY29udGV4dF91dWlkDnF1ZXJ5VGhlbk1dw=="}
+            },
+            "description" : "JSON contendo o scroll da paginação e as atualizações de medições de chuva da página corrente, correspondente aos parâmetros de busca informados, sem ordenação."
+          }
+        }
+      }
+    },
+    "\/pcds/pcds-dados-pg" : {
+      "get" : {
+        "tags" : [ "Dados Ambientais" ],
+        "description" : "Webservice para recuperação dos dados ambientais das PCDs de forma paginada, dado um conjunto de parâmetros. Observação: O scroll foi configurado para ter duração de 30 segundos.",
+        "operationId" : "getPcdsDataPg",
+        "produces" : [ "application/json" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "codestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código da estação no Cemaden. Ex.: 292740804A."
+          },
+          {
+            "name" : "codibge",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "datafim",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data final do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202102010000."
+          },
+          {
+            "name" : "datainicio",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Data inicial do período no formato aaaaMMddHHmm ou aaaaMM (aaaa=ano; MM=mês; dd=dia; HH=hora; mm=minuto). Ex.: 202101010000."
+          },
+          {
+            "name" : "rede",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Identificador da rede observacional. Redes homologadas: 11 (CEMADEN). Ex.: 11."
+          },
+          {
+            "name" : "scroll",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador da paginação, recuperado após a solicitação da primeira página."
+          },
+          {
+            "name" : "sensor",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do sensor da estação no Cemaden. Ex.: 10."
+          },
+          {
+            "name" : "tipoestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do tipo de estação no Cemaden. Ex.: 1."
+          },
+          {
+            "name" : "uf",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Unidade Federativa (UF). Ex.: BA."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "JSON contendo o scroll da paginação e os dados ambientais da página corrente, correspondente aos parâmetros de busca informados, ordenados por datahora de forma crescente.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : {"data":[{"cidade":"UBATUBA","codestacao":"355540612A","datahora":"2020-01-02 00:20","id_sensor":10,"latitude":-23.305,"longitude":-44.869,"nome":"Ubatumirim","offset":null,"qualificacao":"0000","uf":"SP","valor":0.0},{"cidade":"UBATUBA","codestacao":"355540612A","datahora":"2020-01-02 00:20","id_sensor":240,"latitude":-23.305,"longitude":-44.869,"nome":"Ubatumirim","offset":null,"qualificacao":"0000","uf":"SP","valor":0.0}],"scroll": "FGluY2x1ZGVfY29udGV4dF91dWlkDnF1ZXJ5VGhlbk1dw=="}
+            },
+            "description" : "JSON contendo o scroll da paginação e os dados ambientais da página corrente, correspondente aos parâmetros de busca informados, ordenados por datahora de forma crescente."
+          }
+        }
+      }
+    },
+    "\/pcds/pcds-dados-recentes" : {
+      "get" : {
+        "tags" : [ "Dados Ambientais" ],
+        "description" : "Webservice para recuperação dos dados ambientais recentes das PCDs, referentes às últimas 3 horas, dado um conjunto de parâmetros.",
+        "operationId" : "getPcdsRecentData",
+        "produces" : [ "application/xml", "application/json", "text/csv" ],
+        "parameters" : [
+          {
+            "name" : "token",
+            "in" : "header",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - JWT Token, recuperado pelo webservice /controle-token/tokens."
+          },
+          {
+            "name" : "codestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código da estação no Cemaden. Ex.: 292740804A."
+          },
+          {
+            "name" : "codibge",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Código do município no IBGE. Ex.: 2927408."
+          },
+          {
+            "name" : "formato",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Formato dos dados de saída. Valores possíveis: CSV, JSON, XML. Formato padrão: JSON."
+          },
+          {
+            "name" : "rede",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Identificador da rede observacional. Redes homologadas: 11 (CEMADEN). Ex.: 11."
+          },
+          {
+            "name" : "sensor",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do sensor da estação no Cemaden. Ex.: 10."
+          },
+          {
+            "name" : "tipoestacao",
+            "in" : "query",
+            "type" : "string",
+            "description" : "[Opcional] - Identificador do tipo de estação no Cemaden. Ex.: 1."
+          },
+          {
+            "name" : "uf",
+            "in" : "query",
+            "type" : "string",
+            "description" : "OBRIGATÓRIO - Unidade Federativa (UF). Ex.: BA."
+          }
+        ],
+        "responses" : {
+          "200" : {
+            "schema" : {
+"description" : "Lista com os dados ambientais das últimas 3 horas das PCDs, correspondente aos parâmetros de busca informados, ordenada por datahora de forma crescente.",
+"type" : "string"
+            },
+            "examples" : {
+              "application/json" : [{"cidade":"CARANDAÍ","codestacao":"311320601A","datahora":"2021-11-30 14:10","id_sensor":240,"latitude":-20.953,"longitude":-43.805,"nome":"Centro2 MG","offset":null,"qualificacao":"0000","uf":"MG","valor":0.0},{"cidade":"BRUMADINHO","codestacao":"310900601A","datahora":"2021-11-30 14:10","id_sensor":240,"latitude":-20.143,"longitude":-44.2,"nome":"Centro","offset":null,"qualificacao":"0000","uf":"MG","valor":0.0}]
+            },
+            "description" : "Lista com os dados ambientais das últimas 3 horas das PCDs, correspondente aos parâmetros de busca informados, ordenada por datahora de forma crescente."
+          }
+        }
+      }
+    }
+  }
+}
