@@ -2,6 +2,8 @@
 
 Aplicativo de navegação e roteamento inteligente (PWA) focado no **Grande ABC Paulista**, projetado para **detectar e contornar áreas de alagamento e enchentes** em tempo real.
 
+> 📄 **Relatório Acadêmico:** O relatório técnico completo elaborado para avaliação universitária (organização de tarefas, tecnologias, diagramas de arquitetura, trechos de código comentados, procedimentos de teste e custos) encontra-se em [**documentacao/RELATORIO_TECNICO.md**](documentacao/RELATORIO_TECNICO.md).
+
 ---
 
 ## 🚀 Funcionalidades
