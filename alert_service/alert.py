@@ -328,7 +328,7 @@ def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supaba
 
         maior_chuva_1h = 0.0
         maior_chuva_24h = 0.0
-        estacao_mais_chuvosa = None
+        estacao_mais_chuvosa = estacoes[0] if estacoes else None
 
         for est in estacoes:
             cod = est["codEstacao"]
@@ -336,10 +336,12 @@ def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supaba
             acc1 = float(med.get("acc1hr") or 0.0)
             acc24 = float(med.get("acc24hr") or 0.0)
 
-            if acc1 > maior_chuva_1h:
+            if acc1 > maior_chuva_1h or (acc1 == maior_chuva_1h and acc24 > maior_chuva_24h):
                 maior_chuva_1h = acc1
                 maior_chuva_24h = acc24
                 estacao_mais_chuvosa = est
+            elif acc24 > maior_chuva_24h:
+                maior_chuva_24h = acc24
 
         chuva_relevante = max(maior_chuva_1h, maior_chuva_24h * 0.5)
 
