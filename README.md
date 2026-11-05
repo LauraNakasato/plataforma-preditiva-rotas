@@ -43,14 +43,14 @@ flowchart TD
 
 ---
 
-## 🗄️ Esquema do Banco de Dados (Supabase / Scraper)
+## 🗄️ Esquema do Banco de Dados (Supabase / alert_service)
 
 O frontend consulta os pontos de alagamento via `@supabase/supabase-js` através da consulta:
 ```javascript
 const { data, error } = await supabase.from('zonas_risco').select('*');
 ```
 
-Para alimentar esse banco com um **scraper**, **crawler** ou **API externa** (ex: CGE, Defesa Civil, prefeituras), a tabela deve seguir o contrato abaixo:
+Para alimentar esse banco com o serviço autônomo de alertas (`alert_service`), a tabela segue o contrato abaixo:
 
 ### Tabela: `zonas_risco`
 
@@ -58,42 +58,9 @@ Para alimentar esse banco com um **scraper**, **crawler** ou **API externa** (ex
 |---|---|---|---|---|
 | `latitude` | `numeric` / `float8` / `text` | **Sim** | Latitude decimal (WGS84) do ponto crítico | `-23.674` |
 | `longitude` | `numeric` / `float8` / `text` | **Sim** | Longitude decimal (WGS84) do ponto crítico | `-46.546` |
-| `status` | `text` | Não | Estado do ponto (ex: `"risco"`, `"alagado"`, `"moderado"`) | `"risco"` |
+| `status` | `text` | Não | Estado do ponto (ex: `"alerta"`, `"risco"`) | `"alerta"` |
 | `id` | `int8` (PK auto-increment) | Automático | Identificador único do registro gerado pelo banco | `1` |
 | `created_at` | `timestamptz` | Automático | Data/hora do registro (padrão: `now()`) | `2026-11-01T01:45:39.507Z` |
-
-> [!NOTE]
-> O frontend faz o cast automático para número via `parseFloat(z.latitude)` e `parseFloat(z.longitude)`, descartando registros com valores não numéricos (`NaN`).
-
-### Exemplo de JSON retornado pela API:
-```json
-[
-  {
-    "id": 1,
-    "latitude": -23.674,
-    "longitude": -46.546,
-    "status": "risco",
-    "created_at": "2026-11-01T01:45:39.507502+00:00"
-  }
-]
-```
-
-### Exemplo de Payload para o Scraper inserir (`POST`):
-```json
-{
-  "latitude": -23.6552,
-  "longitude": -46.5276,
-  "status": "risco"
-}
-```
-
-### Regras importantes para o desenvolvimento do Scraper:
-1. **Padrão de Coordenadas:** WGS84 (EPSG:4326), formato decimal com sinal negativo (ex: latitude `-23.xxx`, longitude `-46.xxx`).
-2. **Raio de Impacto:** O frontend aplica automaticamente um raio de proteção circular de **150 metros** (`RAIO_RISCO_M = 150`) ao redor de cada par de coordenadas.
-3. **Área Geográfica (Bounding Box do ABC):**
-   - Latitude: entre `-23.95` e `-23.50`
-   - Longitude: entre `-46.75` e `-46.30`
-4. **Limpeza e Validade:** Recomenda-se que o scraper remova ou atualize o `status` para inativo de registros antigos quando a chuva cessar ou a água baixar, evitando bloqueios desnecessários nas vias.
 
 ---
 
@@ -104,6 +71,7 @@ Para alimentar esse banco com um **scraper**, **crawler** ou **API externa** (ex
 - **Roteamento:** OSRM (Open Source Routing Machine)
 - **Geocodificação:** Komoot Photon API (OSM)
 - **Banco de Dados:** Supabase
+- **Serviço de Alertas:** Python 3 (autônomo, sem dependências externas)
 - **PWA:** `@ducanh2912/next-pwa`
 - **Estilo:** Tailwind CSS 4 + Glassmorphism personalizado
 
@@ -113,6 +81,10 @@ Para alimentar esse banco com um **scraper**, **crawler** ou **API externa** (ex
 
 ```text
 plataforma-preditiva-rotas/
+├── alert_service/         # SERVIÇO DE MONITORAMENTO E ALERTAS (Python)
+│   ├── .env.example       # Modelo de variáveis de ambiente (CEMADEN, Supabase)
+│   ├── alert.py           # Motor de cálculo espacial (raio 3km) e inserção
+│   └── main.py            # Ponto de entrada do serviço
 ├── app/
 │   ├── layout.tsx         # Metadados PWA, fontes e tema
 │   ├── page.tsx           # Ponto de entrada (carrega MapaABC via dynamic import)
@@ -121,6 +93,11 @@ plataforma-preditiva-rotas/
 │   └── globals.css        # Estilos globais
 ├── components/
 │   └── InterfaceEnchentes.tsx  # Componente complementar de alertas da Defesa Civil
+├── documentacao/          # DADOS E ESPECIFICAÇÕES
+│   ├── alagamentos_abc_historico.csv
+│   ├── cemaden_swagger.json
+│   ├── pluviometros_santo_andre.csv
+│   └── vulnerabilidade_alagamentos_santo_andre.csv
 └── public/
     ├── manifest.json      # Configuração PWA para instalação mobile
     └── icon.png           # Ícone do aplicativo
@@ -130,24 +107,37 @@ plataforma-preditiva-rotas/
 
 ## 🏁 Como Executar
 
-### Pré-requisitos
-- **Bun** (recomendado) ou **Node.js** (v18+)
+### 1. Aplicação Web (Next.js)
 
-### Com Bun
+#### Com Bun
 ```bash
 bun install
 bun run dev
 ```
 
-### Com Node / NPM
+#### Com Node / NPM
 ```bash
 npm install
 npm run dev
 ```
 
-### Acesso no Smartphone (Rede Local)
-Para testar GPS e PWA em outro dispositivo na mesma rede Wi-Fi:
+#### Acesso no Smartphone (Rede Local)
 ```bash
 bun run dev -- -H 0.0.0.0
 ```
-Acesse pelo navegador do celular usando o IP da sua máquina: `http://<SEU-IP-LOCAL>:3000`.
+Acesse pelo navegador do celular: `http://<SEU-IP-LOCAL>:3000`.
+
+---
+
+### 2. Serviço de Alertas (alert_service)
+
+1. Configure as variáveis de ambiente:
+   ```bash
+   cd alert_service
+   cp .env.example .env
+   ```
+2. Inicie o serviço de monitoramento:
+   ```bash
+   py alert_service/main.py
+   ```
+   *(Ou para teste simulado imediato: `py alert_service/main.py --once --simular`)*
