@@ -1,26 +1,57 @@
+/* Importa o Tailwind CSS, disponibilizando suas classes utilitárias
+   para estilização dos componentes da aplicação. */
 @import "tailwindcss";
 
+/* Define variáveis CSS globais, disponíveis em toda a aplicação. */
 :root {
+  /* Define a cor padrão do fundo da página como branco. */
   --background: #ffffff;
+
+  /* Define a cor padrão dos textos como cinza bem escuro. */
   --foreground: #171717;
 }
 
+/* Configura variáveis de tema utilizadas pelo Tailwind CSS.
+   A palavra-chave inline permite associar as cores e fontes
+   do tema às variáveis definidas na aplicação. */
 @theme inline {
+  /* Registra a cor de fundo do tema. */
   --color-background: var(--background);
+
+  /* Registra a cor principal dos textos. */
   --color-foreground: var(--foreground);
+
+  /* Define a fonte sem serifa utilizada no tema. */
   --font-sans: var(--font-geist-sans);
+
+  /* Define a fonte monoespaçada utilizada no tema. */
   --font-mono: var(--font-geist-mono);
 }
 
+/* Verifica se o dispositivo ou navegador do usuário
+   está configurado para utilizar o modo escuro. */
 @media (prefers-color-scheme: dark) {
+
+  /* Altera as variáveis globais quando o modo escuro está ativo. */
   :root {
+    /* Define um fundo escuro para a página. */
     --background: #0a0a0a;
+
+    /* Define uma cor clara para os textos, melhorando o contraste. */
     --foreground: #ededed;
   }
 }
 
+/* Define as configurações gerais do corpo da página. */
 body {
+  /* Aplica a cor de fundo definida na variável global. */
   background: var(--background);
+
+  /* Aplica a cor de texto definida na variável global. */
   color: var(--foreground);
+
+  /* Define a família de fontes utilizada no conteúdo.
+     Arial é a primeira opção; Helvetica e sans-serif são alternativas
+     caso as fontes anteriores não estejam disponíveis. */
   font-family: Arial, Helvetica, sans-serif;
 }
