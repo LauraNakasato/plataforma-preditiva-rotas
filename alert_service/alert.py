@@ -186,6 +186,7 @@ def consultar_cemaden_acumulados(cemaden_url, token, codibge=COD_IBGE_MUNICIPIO)
     Chama a API do CEMADEN para recuperar acumulados recentes de chuva para o município.
     Endpoint: /PED/rest/pcds-acum/acumulados-recentes?codibge=3547809
     """
+    import ssl
     url = f"{cemaden_url.rstrip('/')}/pcds-acum/acumulados-recentes?codibge={codibge}"
     headers = {
         "Accept": "application/json",
@@ -193,10 +194,24 @@ def consultar_cemaden_acumulados(cemaden_url, token, codibge=COD_IBGE_MUNICIPIO)
     }
 
     req = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        if resp.status == 200:
-            return json.loads(resp.read().decode("utf-8"))
-        raise RuntimeError(f"Erro na API CEMADEN: HTTP {resp.status}")
+    
+    # Tratamento de certificados para domínios governamentais (.gov.br) no Windows
+    try:
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode("utf-8"))
+            raise RuntimeError(f"Erro na API CEMADEN: HTTP {resp.status}")
+    except urllib.error.HTTPError:
+        raise
+    except urllib.error.URLError as e:
+        if "CERTIFICATE_VERIFY_FAILED" in str(e):
+            ctx_sem_verif = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=20, context=ctx_sem_verif) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read().decode("utf-8"))
+                raise RuntimeError(f"Erro na API CEMADEN: HTTP {resp.status}")
+        raise
 
 
 # ================= Integração Supabase =================
