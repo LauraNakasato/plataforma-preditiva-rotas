@@ -38,6 +38,7 @@ yarn-error.log*
 __pycache__/
 *.pyc
 *.pyo
+*.pdf
 
 # vercel
 .vercel

@@ -10,6 +10,7 @@ packages = [{include = "*.py"}]
 python = ">=3.10,<4.0"
 requests = "^2.31.0"
 python-dotenv = "^1.0.0"
+reportlab = "^5.1.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0"]

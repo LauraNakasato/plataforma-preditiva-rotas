@@ -7,6 +7,7 @@ Serviço autônomo em Python para monitoramento das estações do CEMADEN e disp
 - **Autenticação Automática no CEMADEN SGAA**: Não é necessário gerar ou colar tokens manualmente. Com `CEMADEN_EMAIL` e `CEMADEN_PASSWORD` definidos no `.env`, o serviço autentica automaticamente e renova o JWT token sempre que expirar (HTTP 401).
 - **Mapeamento Espacial (Haversine)**: Relaciona pontos vulneráveis a pluviômetros dentro de um raio de influência (3.0 km).
 - **Integração com Supabase**: Consulta áreas ativas e insere novos alertas na tabela `public.zonas_risco`.
+- **Geração de Relatórios em PDF com Emojis**: A cada rodada de monitoramento, gera automaticamente um relatório visual formatado (`relatorio_alertas.pdf`) com banner, cards de resumo, tabelas de risco, status das rotas e suporte completo a emojis.
 - **Modo Mock Seguro**: Flag `MOCK_SUPABASE=true` permite simular inserts sem falhar quando a chave service_role não estiver configurada.
 
 ## Como Executar
@@ -39,4 +40,6 @@ py main.py --once
 - `--raio <km>`: Define o raio de influência espacial (padrão: 3.0 km).
 - `--simular`: Simula medições pluviométricas sem fazer requisições à API.
 - `--mock-supabase`: Força a simulação dos inserts no Supabase.
+- `--pdf-path <caminho>`: Especifica um caminho customizado para salvar o relatório PDF gerado.
+- `--sem-pdf`: Desabilita a geração automática do relatório em PDF.
 - `--env-file <caminho>`: Especifica um arquivo `.env` customizado.

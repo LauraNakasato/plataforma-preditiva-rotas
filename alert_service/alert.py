@@ -11,6 +11,7 @@ Santo André / Grande ABC Paulista
 6. Consulta periodicamente a API oficial do CEMADEN (/pcds-acum/acumulados-recentes).
 7. Se o volume de chuva exceder a tolerância do endereço, insere alerta no Supabase (zonas_risco).
    Suporta modo mock (MOCK_SUPABASE=true) para testes locais sem credenciais de escrita.
+8. Gera automaticamente um relatório em PDF com design profissional, tabelas de risco e emojis.
 """
 
 import os
@@ -23,6 +24,9 @@ import argparse
 import urllib.request
 import urllib.error
 from datetime import datetime
+
+# Garante que o diretório atual do script esteja no sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Garante saída UTF-8 no Windows/PowerShell
 if hasattr(sys.stdout, "reconfigure"):
@@ -370,7 +374,21 @@ def inserir_alerta_supabase(supabase_url, supabase_key, latitude, longitude, sta
 
 # ================= Ciclo de Verificação =================
 
-def executar_rodada(mapeamento, cemaden_sessao, supabase_url, supabase_key, codibge, modo_simulado=False, mock_supabase=False):
+def executar_rodada(
+    mapeamento,
+    cemaden_sessao,
+    supabase_url,
+    supabase_key,
+    codibge,
+    modo_simulado=False,
+    mock_supabase=False,
+    total_pluviometros=20,
+    modo_auth="",
+    intervalo=10,
+    raio_km=3.0,
+    gerar_pdf=True,
+    caminho_pdf=None
+):
     timestamp_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{timestamp_atual}] 🛰️ Iniciando verificação de precipitação...")
 
@@ -409,6 +427,9 @@ def executar_rodada(mapeamento, cemaden_sessao, supabase_url, supabase_key, codi
     }
 
     alertas_disparados = 0
+    pontos_avaliados = []
+    maior_chuva_geral_24h = 0.0
+    maior_chuva_geral_1h = 0.0
 
     # 3. Avaliar cada ponto vulnerável
     for item in mapeamento:
@@ -417,7 +438,7 @@ def executar_rodada(mapeamento, cemaden_sessao, supabase_url, supabase_key, codi
         tol = ponto["tolerancia_mm"]
 
         if not estacoes:
-            print(f"⚠️ {ponto['bairro_regiao']}: Nenhuma estação a menos de {RAIO_INFLUENCIA_KM} km.")
+            print(f"⚠️ {ponto['bairro_regiao']}: Nenhuma estação a menos de {raio_km} km.")
             continue
 
         maior_chuva_1h = 0.0
@@ -437,36 +458,85 @@ def executar_rodada(mapeamento, cemaden_sessao, supabase_url, supabase_key, codi
             elif acc24 > maior_chuva_24h:
                 maior_chuva_24h = acc24
 
+        maior_chuva_geral_1h = max(maior_chuva_geral_1h, maior_chuva_1h)
+        maior_chuva_geral_24h = max(maior_chuva_geral_24h, maior_chuva_24h)
+
         chuva_relevante = max(maior_chuva_1h, maior_chuva_24h * 0.5)
+        limiar_excedido = (chuva_relevante >= tol)
 
-        print(f"📍 {ponto['bairro_regiao']} | Tol: {tol}mm | Chuva detectada: 1h={maior_chuva_1h}mm, 24h={maior_chuva_24h}mm ({estacao_mais_chuvosa['nome'] if estacao_mais_chuvosa else 'N/A'})")
+        nome_est_ref = estacao_mais_chuvosa["nome"] if estacao_mais_chuvosa else "N/A"
+        dist_est_ref = estacao_mais_chuvosa.get("distancia_km", 0.0) if estacao_mais_chuvosa else 0.0
 
-        if chuva_relevante >= tol:
+        print(f"📍 {ponto['bairro_regiao']} | Tol: {tol}mm | Chuva detectada: 1h={maior_chuva_1h}mm, 24h={maior_chuva_24h}mm ({nome_est_ref})")
+
+        status_supabase_desc = "Normal ✅"
+        if limiar_excedido:
             chave_coord = (round(ponto["latitude"], 4), round(ponto["longitude"], 4))
             if chave_coord in coordenadas_ativas:
                 print(f"   ℹ️ Ponto já cadastrado como ativo no Supabase. Inserção ignorada.")
-                continue
+                status_supabase_desc = "Ativo no Supabase ℹ️"
+            else:
+                print(f"   🚨 LIMIAR EXCEDIDO ({chuva_relevante}mm >= {tol}mm)! Inserindo alerta...")
+                try:
+                    inserir_alerta_supabase(
+                        supabase_url=supabase_url,
+                        supabase_key=supabase_key,
+                        latitude=ponto["latitude"],
+                        longitude=ponto["longitude"],
+                        status="alerta",
+                        mock=mock_supabase
+                    )
+                    if mock_supabase:
+                        print(f"   ✅ [MOCK] Alerta gerado com sucesso para {ponto['endereco']}!")
+                    else:
+                        print(f"   ✅ Alerta gravado no Supabase para {ponto['endereco']}!")
+                    alertas_disparados += 1
+                    coordenadas_ativas.add(chave_coord)
+                    status_supabase_desc = "Alerta gravado 🚨"
+                except Exception as e:
+                    print(f"   ❌ Erro ao enviar alerta ao Supabase: {e}")
+                    status_supabase_desc = "Erro no envio ❌"
 
-            print(f"   🚨 LIMIAR EXCEDIDO ({chuva_relevante}mm >= {tol}mm)! Inserindo alerta...")
-            try:
-                inserir_alerta_supabase(
-                    supabase_url=supabase_url,
-                    supabase_key=supabase_key,
-                    latitude=ponto["latitude"],
-                    longitude=ponto["longitude"],
-                    status="alerta",
-                    mock=mock_supabase
-                )
-                if mock_supabase:
-                    print(f"   ✅ [MOCK] Alerta gerado com sucesso para {ponto['endereco']}!")
-                else:
-                    print(f"   ✅ Alerta gravado no Supabase para {ponto['endereco']}!")
-                alertas_disparados += 1
-                coordenadas_ativas.add(chave_coord)
-            except Exception as e:
-                print(f"   ❌ Erro ao enviar alerta ao Supabase: {e}")
+        pontos_avaliados.append({
+            "bairro_regiao": ponto["bairro_regiao"],
+            "endereco": ponto["endereco"],
+            "latitude": ponto["latitude"],
+            "longitude": ponto["longitude"],
+            "tolerancia_mm": tol,
+            "chuva_1h": maior_chuva_1h,
+            "chuva_24h": maior_chuva_24h,
+            "chuva_relevante": chuva_relevante,
+            "estacao_referencia": nome_est_ref,
+            "distancia_km": dist_est_ref,
+            "limiar_excedido": limiar_excedido,
+            "status_supabase": status_supabase_desc,
+            "estacoes_vizinhas": estacoes
+        })
 
     print(f"🏁 Verificação concluída. Alertas emitidos nesta rodada: {alertas_disparados}")
+
+    # 4. Geração do Relatório PDF com Emojis
+    if gerar_pdf:
+        try:
+            from report_pdf import gerar_relatorio_pdf
+            dados_relatorio = {
+                "timestamp": timestamp_atual,
+                "municipio": f"Santo André (IBGE: {codibge})",
+                "intervalo": intervalo,
+                "raio_km": raio_km,
+                "modo_auth": modo_auth,
+                "mock_supabase": mock_supabase,
+                "total_pluviometros": total_pluviometros,
+                "estacoes_ativas": len(medicoes_por_estacao),
+                "pontos_avaliados": pontos_avaliados,
+                "alertas_disparados": alertas_disparados,
+                "maior_chuva_24h": maior_chuva_geral_24h,
+                "maior_chuva_1h": maior_chuva_geral_1h,
+            }
+            pdf_salvo = gerar_relatorio_pdf(dados_relatorio, caminho_saida=caminho_pdf)
+            print(f"📄 [PDF] Relatório gerado com sucesso: {pdf_salvo}")
+        except Exception as e:
+            print(f"⚠️ Erro ao gerar relatório PDF: {e}")
 
 
 # ================= Função Principal =================
@@ -482,6 +552,8 @@ def main():
     parser.add_argument("--cemaden-email", type=str, default=None, help="Email para login no CEMADEN SGAA")
     parser.add_argument("--cemaden-password", type=str, default=None, help="Senha para login no CEMADEN SGAA")
     parser.add_argument("--cemaden-token", type=str, default=None, help="Token JWT estático do CEMADEN")
+    parser.add_argument("--pdf-path", type=str, default=None, help="Caminho do arquivo PDF gerado")
+    parser.add_argument("--sem-pdf", action="store_true", help="Desabilita a geração do relatório em PDF")
     args = parser.parse_args()
 
     if args.env_file:
@@ -525,6 +597,7 @@ def main():
     print(f"📍 Município IBGE: {codibge} (Santo André)")
     print(f"🔑 Autenticação CEMADEN: {modo_auth}")
     print(f"🗄️ Modo Supabase: {'MOCK ATIVO (simulação local de INSERT)' if mock_supabase else 'PRODUÇÃO (gravação real no Supabase)'}")
+    print(f"📄 Relatório PDF: {'Habilitado (alert_service/relatorio_alertas.pdf)' if not args.sem_pdf else 'Desabilitado'}")
     print("=" * 70)
 
     # Carregar arquivos de dados
@@ -554,7 +627,13 @@ def main():
                 supabase_key=supabase_key,
                 codibge=codibge,
                 modo_simulado=args.simular,
-                mock_supabase=mock_supabase
+                mock_supabase=mock_supabase,
+                total_pluviometros=len(pluviometros),
+                modo_auth=modo_auth,
+                intervalo=intervalo,
+                raio_km=raio,
+                gerar_pdf=not args.sem_pdf,
+                caminho_pdf=args.pdf_path
             )
             if args.once:
                 print("\nFlag --once informada. Encerrando execução.")
