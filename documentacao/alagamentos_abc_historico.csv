@@ -1,0 +1,8 @@
+id,cidade,bairro_regiao,endereco,latitude,longitude,frequencia,ultimo_impacto,observacoes
+dd11e3c4-87db-4b60-adbd-540c5c6cc10f,Santo André,Fundação Santo André / Jd. João Ramalho,"Avenida dos Estados (próximo à Fundação Santo André, viadutos centrais e cruzamento com a Rua Itapaiva)",-23.6335,-46.5598,Alta,Abril de 2026,"Últimos impactos: Março de 2025, Abril de 2026"
+90c53de8-bad7-4963-bd72-f8d028e8962c,Santo André,Centro / Casa Branca,Avenida Firestone (cruzamento com a Av. Santos Dumont) e Avenida Industrial (próximo ao terminal),-23.6596,-46.5273,Alta,Setembro de 2025,
+9fedeecb-c80e-4511-9ac5-df8a70d85b0a,Santo André,Vila Luzita,"Avenida Capitão Mário Toledo de Barros/Camargo, 4500",-23.6845,-46.516,Média a Alta,Janeiro de 2026,
+16b29cec-e30a-4b39-9b4d-3c2880582370,Santo André,Centro / Vila Pires,Entorno da Estação Prefeito Celso Daniel e Vila Pires,-23.6558,-46.5279,Alta,Abril de 2025,Últimos impactos: Março e Abril de 2025
+c765eff8-b533-4d24-bcd5-4be8ed85d886,Santo André,Vila Pires / Centro,Avenida Dom Pedro I e Avenida Perimetral,-23.6706,-46.5255,Não informada,Janeiro de 2026,
+816f7e08-0c48-4542-b32e-da8c16da1272,Santo André,Vila Utinga,Rua dos Alpes,-23.6186,-46.5375,Média a Alta,Não informado,
+d4d89f21-86b9-41ff-8dd7-4eb154e438ce,Santo André,Vila Guarani,Rua Hatsuey Motomura e Rua Aimorés,-23.6791,-46.5247,Não informada,Início de 2026,
