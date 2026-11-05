@@ -43,6 +43,60 @@ flowchart TD
 
 ---
 
+## 🗄️ Esquema do Banco de Dados (Supabase / Scraper)
+
+O frontend consulta os pontos de alagamento via `@supabase/supabase-js` através da consulta:
+```javascript
+const { data, error } = await supabase.from('zonas_risco').select('*');
+```
+
+Para alimentar esse banco com um **scraper**, **crawler** ou **API externa** (ex: CGE, Defesa Civil, prefeituras), a tabela deve seguir o contrato abaixo:
+
+### Tabela: `zonas_risco`
+
+| Campo | Tipo | Obrigatório | Descrição | Exemplo |
+|---|---|---|---|---|
+| `latitude` | `numeric` / `float8` / `text` | **Sim** | Latitude decimal (WGS84) do ponto crítico | `-23.674` |
+| `longitude` | `numeric` / `float8` / `text` | **Sim** | Longitude decimal (WGS84) do ponto crítico | `-46.546` |
+| `status` | `text` | Não | Estado do ponto (ex: `"risco"`, `"alagado"`, `"moderado"`) | `"risco"` |
+| `id` | `int8` (PK auto-increment) | Automático | Identificador único do registro gerado pelo banco | `1` |
+| `created_at` | `timestamptz` | Automático | Data/hora do registro (padrão: `now()`) | `2026-11-01T01:45:39.507Z` |
+
+> [!NOTE]
+> O frontend faz o cast automático para número via `parseFloat(z.latitude)` e `parseFloat(z.longitude)`, descartando registros com valores não numéricos (`NaN`).
+
+### Exemplo de JSON retornado pela API:
+```json
+[
+  {
+    "id": 1,
+    "latitude": -23.674,
+    "longitude": -46.546,
+    "status": "risco",
+    "created_at": "2026-11-01T01:45:39.507502+00:00"
+  }
+]
+```
+
+### Exemplo de Payload para o Scraper inserir (`POST`):
+```json
+{
+  "latitude": -23.6552,
+  "longitude": -46.5276,
+  "status": "risco"
+}
+```
+
+### Regras importantes para o desenvolvimento do Scraper:
+1. **Padrão de Coordenadas:** WGS84 (EPSG:4326), formato decimal com sinal negativo (ex: latitude `-23.xxx`, longitude `-46.xxx`).
+2. **Raio de Impacto:** O frontend aplica automaticamente um raio de proteção circular de **150 metros** (`RAIO_RISCO_M = 150`) ao redor de cada par de coordenadas.
+3. **Área Geográfica (Bounding Box do ABC):**
+   - Latitude: entre `-23.95` e `-23.50`
+   - Longitude: entre `-46.75` e `-46.30`
+4. **Limpeza e Validade:** Recomenda-se que o scraper remova ou atualize o `status` para inativo de registros antigos quando a chuva cessar ou a água baixar, evitando bloqueios desnecessários nas vias.
+
+---
+
 ## 🛠 Tecnologias
 
 - **Frontend:** Next.js 16 (App Router, Turbopack, React 19)
