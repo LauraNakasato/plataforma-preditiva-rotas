@@ -8,6 +8,7 @@ Santo André / Grande ABC Paulista
 4. Mapeia a área de influência espacial (raio de 3 km) entre pluviômetros e pontos vulneráveis.
 5. Consulta periodicamente a API oficial do CEMADEN (/pcds-acum/acumulados-recentes).
 6. Se o volume de chuva exceder a tolerância do endereço, insere alerta no Supabase (zonas_risco).
+   Suporta modo mock (MOCK_SUPABASE=true) para testes locais sem credenciais de escrita.
 """
 
 import os
@@ -31,8 +32,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 def carregar_env(caminho_env=None):
     """
-    Carrega variáveis de ambiente a partir de um arquivo .env sem necessidade de bibliotecas externas.
-    Procura na pasta informada, em alert_service/.env, no diretório atual ou na raiz do projeto.
+    Carrega variáveis do arquivo .env.
+    Tenta usar python-dotenv se disponível; caso contrário usa carregador nativo.
     """
     candidatos = [
         caminho_env,
@@ -43,22 +44,27 @@ def carregar_env(caminho_env=None):
     for c in candidatos:
         if c and os.path.isfile(c):
             try:
-                with open(c, mode="r", encoding="utf-8") as f:
-                    for linha in f:
-                        linha = linha.strip()
-                        if not linha or linha.startswith("#"):
-                            continue
-                        if "=" in linha:
-                            chave, valor = linha.split("=", 1)
-                            chave = chave.strip()
-                            valor = valor.strip().strip("'\"")
-                            # Só atribui se ainda não estiver definido no ambiente
-                            if chave and chave not in os.environ:
-                                os.environ[chave] = valor
-                print(f"📄 Configurações carregadas do arquivo: {os.path.abspath(c)}")
+                from dotenv import load_dotenv
+                load_dotenv(c)
+                print(f"📄 Configurações carregadas do arquivo (dotenv): {os.path.abspath(c)}")
                 return True
-            except Exception as e:
-                print(f"⚠️ Erro ao ler arquivo .env ({c}): {e}")
+            except ImportError:
+                try:
+                    with open(c, mode="r", encoding="utf-8") as f:
+                        for linha in f:
+                            linha = linha.strip()
+                            if not linha or linha.startswith("#"):
+                                continue
+                            if "=" in linha:
+                                chave, valor = linha.split("=", 1)
+                                chave = chave.strip()
+                                valor = valor.strip().strip("'\"")
+                                if chave and chave not in os.environ:
+                                    os.environ[chave] = valor
+                    print(f"📄 Configurações carregadas do arquivo (nativo): {os.path.abspath(c)}")
+                    return True
+                except Exception as e:
+                    print(f"⚠️ Erro ao ler arquivo .env ({c}): {e}")
     return False
 
 
@@ -77,6 +83,7 @@ DEFAULT_SUPABASE_KEY = (
 COD_IBGE_MUNICIPIO = os.environ.get("COD_IBGE_MUNICIPIO", "3547809")
 RAIO_INFLUENCIA_KM = float(os.environ.get("RAIO_INFLUENCIA_KM", 3.0))
 INTERVALO_MINUTOS = int(os.environ.get("INTERVALO_MINUTOS", 10))
+MOCK_SUPABASE = os.environ.get("MOCK_SUPABASE", "true").lower() in ("true", "1", "yes")
 
 
 # ================= Funções de Suporte =================
@@ -210,11 +217,17 @@ def obter_zonas_ativas_supabase(supabase_url, supabase_key):
         return []
 
 
-def inserir_alerta_supabase(supabase_url, supabase_key, latitude, longitude, status="alerta"):
+def inserir_alerta_supabase(supabase_url, supabase_key, latitude, longitude, status="alerta", mock=False):
     """
     Insere um ponto crítico na tabela zonas_risco do Supabase.
     Payload: {"latitude": lat, "longitude": lng, "status": "alerta"}
+    Se mock=True, simula a inserção sem falhar por falta de permissão de escrita.
     """
+    if mock:
+        print(f"   [MOCK SUPABASE] 📦 Simulação de INSERT na tabela public.zonas_risco:")
+        print(f"                   -> latitude={latitude}, longitude={longitude}, status='{status}'")
+        return [{"id": "mock-simulado", "latitude": latitude, "longitude": longitude, "status": status}]
+
     url = f"{supabase_url.rstrip('/')}/rest/v1/zonas_risco"
     payload = json.dumps({
         "latitude": latitude,
@@ -238,8 +251,9 @@ def inserir_alerta_supabase(supabase_url, supabase_key, latitude, longitude, sta
         err_msg = e.read().decode("utf-8")
         if e.code == 401:
             print("❌ Erro 401 no Supabase: Permissão negada para INSERT na tabela zonas_risco.")
-            print("   Dica 1: Preencha SUPABASE_SERVICE_ROLE_KEY no seu arquivo .env com a service_role secret.")
-            print("   Dica 2: Ou execute no SQL Editor do Supabase: GRANT INSERT, SELECT, DELETE ON public.zonas_risco TO anon;")
+            print("   Dica 1: Defina MOCK_SUPABASE=true no seu .env para simular as inserções.")
+            print("   Dica 2: Ou preencha SUPABASE_SERVICE_ROLE_KEY no .env com a service_role secret.")
+            print("   Dica 3: Ou execute no SQL Editor do Supabase: GRANT INSERT, SELECT, DELETE ON public.zonas_risco TO anon;")
         else:
             print(f"❌ Erro HTTP {e.code} ao inserir no Supabase: {err_msg}")
         raise
@@ -247,7 +261,7 @@ def inserir_alerta_supabase(supabase_url, supabase_key, latitude, longitude, sta
 
 # ================= Ciclo de Verificação =================
 
-def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supabase_key, codibge, modo_simulado=False):
+def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supabase_key, codibge, modo_simulado=False, mock_supabase=False):
     timestamp_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{timestamp_atual}] 🛰️ Iniciando verificação de precipitação...")
 
@@ -255,7 +269,7 @@ def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supaba
     medicoes_por_estacao = {}
     if modo_simulado or not cemaden_token:
         if not cemaden_token and not modo_simulado:
-            print("⚠️ Token do CEMADEN não configurado! Executando em MODO SIMULADO para demonstração.")
+            print("ℹ️ Token do CEMADEN não configurado. Utilizando valores de chuva simulados.")
         import random
         for item in mapeamento:
             for est in item["estacoes"]:
@@ -322,16 +336,20 @@ def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supaba
                 print(f"   ℹ️ Ponto já cadastrado como ativo no Supabase. Inserção ignorada.")
                 continue
 
-            print(f"   🚨 LIMIAR EXCEDIDO ({chuva_relevante}mm >= {tol}mm)! Inserindo alerta no Supabase...")
+            print(f"   🚨 LIMIAR EXCEDIDO ({chuva_relevante}mm >= {tol}mm)! Inserindo alerta...")
             try:
                 inserir_alerta_supabase(
                     supabase_url=supabase_url,
                     supabase_key=supabase_key,
                     latitude=ponto["latitude"],
                     longitude=ponto["longitude"],
-                    status="alerta"
+                    status="alerta",
+                    mock=mock_supabase
                 )
-                print(f"   ✅ Alerta registrado com sucesso para {ponto['endereco']}!")
+                if mock_supabase:
+                    print(f"   ✅ [MOCK] Alerta gerado com sucesso para {ponto['endereco']}!")
+                else:
+                    print(f"   ✅ Alerta gravado no Supabase para {ponto['endereco']}!")
                 alertas_disparados += 1
                 coordenadas_ativas.add(chave_coord)
             except Exception as e:
@@ -344,15 +362,20 @@ def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supaba
 
 def main():
     parser = argparse.ArgumentParser(description="Serviço de Alertas de Alagamento (alert_service)")
-    parser.add_argument("--intervalo", type=int, default=INTERVALO_MINUTOS, help=f"Intervalo em minutos entre consultas (padrão: {INTERVALO_MINUTOS})")
-    parser.add_argument("--raio", type=float, default=RAIO_INFLUENCIA_KM, help=f"Raio de influência em km (padrão: {RAIO_INFLUENCIA_KM})")
+    parser.add_argument("--intervalo", type=int, default=None, help="Intervalo em minutos entre consultas")
+    parser.add_argument("--raio", type=float, default=None, help="Raio de influência em km (padrão: 3.0)")
     parser.add_argument("--env-file", type=str, default=None, help="Caminho para arquivo .env customizado")
     parser.add_argument("--once", action="store_true", help="Executa apenas uma rodada e finaliza")
     parser.add_argument("--simular", action="store_true", help="Simula medições de chuva para testes sem token da API")
+    parser.add_argument("--mock-supabase", action="store_true", help="Força mock na inserção do Supabase")
     args = parser.parse_args()
 
     if args.env_file:
         carregar_env(args.env_file)
+
+    intervalo = args.intervalo or int(os.environ.get("INTERVALO_MINUTOS", INTERVALO_MINUTOS))
+    raio = args.raio or float(os.environ.get("RAIO_INFLUENCIA_KM", RAIO_INFLUENCIA_KM))
+    mock_supabase = args.mock_supabase or (os.environ.get("MOCK_SUPABASE", "true").lower() in ("true", "1", "yes"))
 
     cemaden_url = os.environ.get("CEMADEN_URL", DEFAULT_CEMADEN_URL)
     cemaden_token = os.environ.get("CEMADEN_TOKEN", "")
@@ -366,8 +389,9 @@ def main():
 
     print("=" * 70)
     print("🌊 SERVIÇO DE ALERTAS DE ALAGAMENTO (ALERT_SERVICE)")
-    print(f"⏱️ Intervalo: a cada {args.intervalo} minutos | 🎯 Raio de Influência: {args.raio} km")
+    print(f"⏱️ Intervalo: a cada {intervalo} minutos | 🎯 Raio de Influência: {raio} km")
     print(f"📍 Município IBGE: {codibge} (Santo André)")
+    print(f"🗄️ Modo Supabase: {'MOCK ATIVO (simulação local de INSERT)' if mock_supabase else 'PRODUÇÃO (gravação real no Supabase)'}")
     print("=" * 70)
 
     # Carregar arquivos de dados
@@ -376,7 +400,7 @@ def main():
 
     pluviometros = carregar_pluviometros(caminho_pluv)
     pontos_vuln = carregar_pontos_vulnerabilidade(caminho_vuln)
-    mapeamento = mapear_areas_influencia(pontos_vuln, pluviometros, raio_km=args.raio)
+    mapeamento = mapear_areas_influencia(pontos_vuln, pluviometros, raio_km=raio)
 
     print(f"📦 Pluviômetros carregados: {len(pluviometros)}")
     print(f"📦 Pontos de vulnerabilidade: {len(pontos_vuln)}")
@@ -397,13 +421,14 @@ def main():
                 supabase_url=supabase_url,
                 supabase_key=supabase_key,
                 codibge=codibge,
-                modo_simulado=args.simular
+                modo_simulado=args.simular,
+                mock_supabase=mock_supabase
             )
             if args.once:
                 print("\nFlag --once informada. Encerrando execução.")
                 break
-            print(f"\n⏳ Próxima consulta em {args.intervalo} minutos... Pressione Ctrl+C para parar.")
-            time.sleep(args.intervalo * 60)
+            print(f"\n⏳ Próxima consulta em {intervalo} minutos... Pressione Ctrl+C para parar.")
+            time.sleep(intervalo * 60)
     except KeyboardInterrupt:
         print("\n\n🛑 Serviço encerrado pelo usuário.")
 
