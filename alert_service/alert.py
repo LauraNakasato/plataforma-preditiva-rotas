@@ -3,11 +3,13 @@ Serviço de Monitoramento e Alertas de Alagamento (alert_service)
 Santo André / Grande ABC Paulista
 ------------------------------------------------------------------
 1. Carrega variáveis de ambiente automaticamente do arquivo .env.
-2. Lê as estações pluviométricas do CEMADEN (documentacao/pluviometros_santo_andre.csv).
-3. Lê os pontos críticos e suas tolerâncias (documentacao/vulnerabilidade_alagamentos_santo_andre.csv).
-4. Mapeia a área de influência espacial (raio de 3 km) entre pluviômetros e pontos vulneráveis.
-5. Consulta periodicamente a API oficial do CEMADEN (/pcds-acum/acumulados-recentes).
-6. Se o volume de chuva exceder a tolerância do endereço, insere alerta no Supabase (zonas_risco).
+2. Autentica no webservice do CEMADEN SGAA (/controle-token/tokens) e
+   renova o token JWT automaticamente quando expirado.
+3. Lê as estações pluviométricas do CEMADEN (documentacao/pluviometros_santo_andre.csv).
+4. Lê os pontos críticos e suas tolerâncias (documentacao/vulnerabilidade_alagamentos_santo_andre.csv).
+5. Mapeia a área de influência espacial (raio de 3 km) entre pluviômetros e pontos vulneráveis.
+6. Consulta periodicamente a API oficial do CEMADEN (/pcds-acum/acumulados-recentes).
+7. Se o volume de chuva exceder a tolerância do endereço, insere alerta no Supabase (zonas_risco).
    Suporta modo mock (MOCK_SUPABASE=true) para testes locais sem credenciais de escrita.
 """
 
@@ -73,6 +75,11 @@ carregar_env()
 
 # ================= Configurações Padrão (com fallback para .env) =================
 DEFAULT_CEMADEN_URL = os.environ.get("CEMADEN_URL", "https://sws.cemaden.gov.br/PED/rest")
+DEFAULT_CEMADEN_SGAA_URL = os.environ.get("CEMADEN_SGAA_URL", "https://sgaa.cemaden.gov.br/SGAA/rest/controle-token/tokens")
+DEFAULT_CEMADEN_EMAIL = os.environ.get("CEMADEN_EMAIL", "")
+DEFAULT_CEMADEN_PASSWORD = os.environ.get("CEMADEN_PASSWORD", "")
+DEFAULT_CEMADEN_TOKEN = os.environ.get("CEMADEN_TOKEN", "")
+
 DEFAULT_SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://dzhfqsftxdkauwgrxgdf.supabase.co")
 DEFAULT_SUPABASE_KEY = (
     os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or
@@ -181,9 +188,52 @@ def mapear_areas_influencia(pontos_vulneraveis, pluviometros, raio_km=RAIO_INFLU
 
 # ================= Integração CEMADEN =================
 
+def autenticar_cemaden(email, password, sgaa_url=DEFAULT_CEMADEN_SGAA_URL):
+    """
+    Solicita um novo token JWT ao SGAA do CEMADEN utilizando email e senha.
+    Endpoint: POST /SGAA/rest/controle-token/tokens
+    """
+    import ssl
+    if not email or not password:
+        raise ValueError("Email ou senha do CEMADEN não informados.")
+
+    payload = json.dumps({"email": email, "password": password}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    req = urllib.request.Request(sgaa_url, data=payload, headers=headers, method="POST")
+
+    def _executar(ctx):
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        ctx = ssl.create_default_context()
+        corpo = _executar(ctx)
+    except urllib.error.URLError as e:
+        if "CERTIFICATE_VERIFY_FAILED" in str(e):
+            ctx_sem_verif = ssl._create_unverified_context()
+            corpo = _executar(ctx_sem_verif)
+        else:
+            raise
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Erro HTTP {e.code} ao autenticar no CEMADEN SGAA: {msg}")
+
+    token = corpo.get("token")
+    tempo_exp = corpo.get("timeToExp", "N/A")
+    if not token:
+        msg_erro = corpo.get("Alerta") or corpo.get("mensagem") or corpo
+        raise RuntimeError(f"Falha na autenticação do CEMADEN: {msg_erro}")
+
+    print(f"🔑 [CEMADEN SGAA] Novo token JWT gerado com sucesso (válido por ~{tempo_exp} min).")
+    return token
+
+
 def consultar_cemaden_acumulados(cemaden_url, token, codibge=COD_IBGE_MUNICIPIO):
     """
-    Chama a API do CEMADEN para recuperar acumulados recentes de chuva para o município.
+    Chama a API de dados do CEMADEN para recuperar acumulados recentes de chuva para o município.
     Endpoint: /PED/rest/pcds-acum/acumulados-recentes?codibge=3547809
     """
     import ssl
@@ -194,7 +244,7 @@ def consultar_cemaden_acumulados(cemaden_url, token, codibge=COD_IBGE_MUNICIPIO)
     }
 
     req = urllib.request.Request(url, headers=headers, method="GET")
-    
+
     # Tratamento de certificados para domínios governamentais (.gov.br) no Windows
     try:
         ctx = ssl.create_default_context()
@@ -212,6 +262,50 @@ def consultar_cemaden_acumulados(cemaden_url, token, codibge=COD_IBGE_MUNICIPIO)
                     return json.loads(resp.read().decode("utf-8"))
                 raise RuntimeError(f"Erro na API CEMADEN: HTTP {resp.status}")
         raise
+
+
+class CemadenSessao:
+    """
+    Gerenciador de sessão com a API do CEMADEN.
+    Fornece renovação automática do JWT token via SGAA caso expire (HTTP 401).
+    """
+
+    def __init__(self, token=None, email=None, password=None, sgaa_url=None, ped_url=None):
+        self.token = token.strip() if token else ""
+        self.email = email.strip() if email else ""
+        self.password = password.strip() if password else ""
+        self.sgaa_url = sgaa_url or DEFAULT_CEMADEN_SGAA_URL
+        self.ped_url = ped_url or DEFAULT_CEMADEN_URL
+
+    def tem_credenciais(self):
+        return bool(self.token or (self.email and self.password))
+
+    def obter_token(self, forcar_renovacao=False):
+        """Retorna o token ativo, renovando ou gerando novo se necessário."""
+        if not self.token or forcar_renovacao:
+            if self.email and self.password:
+                self.token = autenticar_cemaden(self.email, self.password, self.sgaa_url)
+            elif not self.token:
+                return None
+        return self.token
+
+    def consultar_acumulados(self, codibge):
+        """
+        Consulta os dados pluviométricos. Se o token expirar (HTTP 401),
+        renova automaticamente via credenciais de SGAA e repete a consulta.
+        """
+        token = self.obter_token()
+        if not token:
+            raise ValueError("Nenhum token disponível e sem credenciais de email/senha para autenticação.")
+
+        try:
+            return consultar_cemaden_acumulados(self.ped_url, token, codibge)
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and self.email and self.password:
+                print("⚠️ [CEMADEN] Token expirado ou rejeitado (HTTP 401). Renovando automaticamente via SGAA...")
+                token = self.obter_token(forcar_renovacao=True)
+                return consultar_cemaden_acumulados(self.ped_url, token, codibge)
+            raise
 
 
 # ================= Integração Supabase =================
@@ -276,15 +370,15 @@ def inserir_alerta_supabase(supabase_url, supabase_key, latitude, longitude, sta
 
 # ================= Ciclo de Verificação =================
 
-def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supabase_key, codibge, modo_simulado=False, mock_supabase=False):
+def executar_rodada(mapeamento, cemaden_sessao, supabase_url, supabase_key, codibge, modo_simulado=False, mock_supabase=False):
     timestamp_atual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{timestamp_atual}] 🛰️ Iniciando verificação de precipitação...")
 
     # 1. Obter medições de chuva das estações
     medicoes_por_estacao = {}
-    if modo_simulado or not cemaden_token:
-        if not cemaden_token and not modo_simulado:
-            print("ℹ️ Token do CEMADEN não configurado. Utilizando valores de chuva simulados.")
+    if modo_simulado or not cemaden_sessao.tem_credenciais():
+        if not modo_simulado:
+            print("ℹ️ Credenciais do CEMADEN não configuradas. Utilizando valores de chuva simulados.")
         import random
         for item in mapeamento:
             for est in item["estacoes"]:
@@ -297,7 +391,7 @@ def executar_rodada(mapeamento, cemaden_url, cemaden_token, supabase_url, supaba
                     }
     else:
         try:
-            dados_cemaden = consultar_cemaden_acumulados(cemaden_url, cemaden_token, codibge=codibge)
+            dados_cemaden = cemaden_sessao.consultar_acumulados(codibge=codibge)
             for item in dados_cemaden:
                 cod = item.get("codestacao")
                 if cod:
@@ -383,8 +477,11 @@ def main():
     parser.add_argument("--raio", type=float, default=None, help="Raio de influência em km (padrão: 3.0)")
     parser.add_argument("--env-file", type=str, default=None, help="Caminho para arquivo .env customizado")
     parser.add_argument("--once", action="store_true", help="Executa apenas uma rodada e finaliza")
-    parser.add_argument("--simular", action="store_true", help="Simula medições de chuva para testes sem token da API")
+    parser.add_argument("--simular", action="store_true", help="Simula medições de chuva para testes sem API")
     parser.add_argument("--mock-supabase", action="store_true", help="Força mock na inserção do Supabase")
+    parser.add_argument("--cemaden-email", type=str, default=None, help="Email para login no CEMADEN SGAA")
+    parser.add_argument("--cemaden-password", type=str, default=None, help="Senha para login no CEMADEN SGAA")
+    parser.add_argument("--cemaden-token", type=str, default=None, help="Token JWT estático do CEMADEN")
     args = parser.parse_args()
 
     if args.env_file:
@@ -394,8 +491,12 @@ def main():
     raio = args.raio or float(os.environ.get("RAIO_INFLUENCIA_KM", RAIO_INFLUENCIA_KM))
     mock_supabase = args.mock_supabase or (os.environ.get("MOCK_SUPABASE", "true").lower() in ("true", "1", "yes"))
 
+    cemaden_email = args.cemaden_email or os.environ.get("CEMADEN_EMAIL", DEFAULT_CEMADEN_EMAIL)
+    cemaden_password = args.cemaden_password or os.environ.get("CEMADEN_PASSWORD", DEFAULT_CEMADEN_PASSWORD)
+    cemaden_token = args.cemaden_token or os.environ.get("CEMADEN_TOKEN", DEFAULT_CEMADEN_TOKEN)
+    cemaden_sgaa_url = os.environ.get("CEMADEN_SGAA_URL", DEFAULT_CEMADEN_SGAA_URL)
     cemaden_url = os.environ.get("CEMADEN_URL", DEFAULT_CEMADEN_URL)
-    cemaden_token = os.environ.get("CEMADEN_TOKEN", "")
+
     codibge = os.environ.get("COD_IBGE_MUNICIPIO", COD_IBGE_MUNICIPIO)
     supabase_url = os.environ.get("SUPABASE_URL", DEFAULT_SUPABASE_URL)
     supabase_key = (
@@ -404,10 +505,25 @@ def main():
         DEFAULT_SUPABASE_KEY
     )
 
+    cemaden_sessao = CemadenSessao(
+        token=cemaden_token,
+        email=cemaden_email,
+        password=cemaden_password,
+        sgaa_url=cemaden_sgaa_url,
+        ped_url=cemaden_url
+    )
+
+    modo_auth = "Simulação (sem credenciais)"
+    if cemaden_email and cemaden_password:
+        modo_auth = f"Automática via SGAA ({cemaden_email})"
+    elif cemaden_token:
+        modo_auth = "Token JWT estático pré-configurado"
+
     print("=" * 70)
     print("🌊 SERVIÇO DE ALERTAS DE ALAGAMENTO (ALERT_SERVICE)")
     print(f"⏱️ Intervalo: a cada {intervalo} minutos | 🎯 Raio de Influência: {raio} km")
     print(f"📍 Município IBGE: {codibge} (Santo André)")
+    print(f"🔑 Autenticação CEMADEN: {modo_auth}")
     print(f"🗄️ Modo Supabase: {'MOCK ATIVO (simulação local de INSERT)' if mock_supabase else 'PRODUÇÃO (gravação real no Supabase)'}")
     print("=" * 70)
 
@@ -433,8 +549,7 @@ def main():
         while True:
             executar_rodada(
                 mapeamento=mapeamento,
-                cemaden_url=cemaden_url,
-                cemaden_token=cemaden_token,
+                cemaden_sessao=cemaden_sessao,
                 supabase_url=supabase_url,
                 supabase_key=supabase_key,
                 codibge=codibge,
