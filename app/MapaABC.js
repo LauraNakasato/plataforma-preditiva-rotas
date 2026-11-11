@@ -17,6 +17,9 @@ import 'leaflet-routing-machine';
 // Importa a conexão com o Supabase, utilizada para acessar o banco de dados.
 import { supabase } from './supabase';
 
+// importa o componente de reporte que coleta os dados e os entrega ao callback do backend.
+import BotaoReporte from '../components/BotaoReporte';
+
 
 // ───────────────────────── CONSTANTES ─────────────────────────
 
@@ -1740,7 +1743,10 @@ function ListaPassos({
 // Componente principal da aplicação de navegação do ABC Paulista.
 // Reúne o mapa, pesquisa de endereços, cálculo de rotas,
 // alternativas de percurso, GPS e interface de navegação.
-export default function MapaABC() {
+/**
+ * onEnviarReporte recebe os dados do formulário e deve cuidar do upload da foto e do salvamento.
+ */
+export default function MapaABC({ onEnviarReporte }) {
 
     // ───────────────────────── REFERÊNCIAS DO DOM ─────────────────────────
 
@@ -1913,6 +1919,10 @@ export default function MapaABC() {
     // Controla a etapa atual da interface.
     // Os valores possíveis são: busca, itinerário e navegando.
     const [fase, setFase] = useState('busca');
+
+    // Disponibiliza a instância do Leaflet para componentes de interface
+    // que precisam interagir com o mapa, como o botão de reporte.
+    const [instanciaMapa, setInstanciaMapa] = useState(null);
 
     // Armazena as rotas alternativas disponíveis.
     const [candidatas, setCandidatas] = useState([]);
@@ -2452,6 +2462,7 @@ export default function MapaABC() {
 
         // Armazena a instância criada na referência do React.
         mapRef.current = map;
+        setInstanciaMapa(map);
 
 
         // ───────────────────────── ORGANIZAÇÃO DAS CAMADAS ─────────────────────────
@@ -2772,6 +2783,7 @@ export default function MapaABC() {
             // Remove o mapa e seus elementos associados,
             // liberando os recursos utilizados pelo Leaflet.
             map.remove();
+            setInstanciaMapa(null);
             // ───── Finalização da limpeza do mapa ─────
 
             // Remove as referências dos elementos do mapa.
@@ -4156,6 +4168,18 @@ export default function MapaABC() {
 
             {/* Camada superior da interface, onde ficam os painéis e botões. */}
             <div className="mabc-overlay">
+                {/* Botão flutuante e formulário de reporte de ocorrências. */}
+                {/*
+                    Entrega a instância do Leaflet para permitir a marcação da ocorrência.
+                */}
+                <BotaoReporte
+                    map={instanciaMapa}
+                    fase={fase}
+                    listaAberta={listaAberta}
+                    emPerigo={emPerigo}
+                    onEnviarReporte={onEnviarReporte}
+                />
+
 
                 {/* ───── Fase 1: busca de origem e destino ───── */}
                 {fase === 'busca' && (
