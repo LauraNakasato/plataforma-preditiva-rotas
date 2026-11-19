@@ -1,5 +1,7 @@
 "use client";
 
+import BotaoReporte from '../components/BotaoReporte';
+
 // Importa os hooks do React utilizados para controlar estados,
 // executar efeitos, guardar referências e memorizar funções.
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -4523,6 +4525,17 @@ export default function MapaABC() {
                         Centralizar
                     </button>
                 )}
+
+                <BotaoReporte 
+                    map={mapRef.current} 
+                    fase={fase} 
+                    listaAberta={listaAberta} 
+                    emPerigo={emPerigo}
+                    onEnviarReporte={async (dados) => {
+                        // Ponto de integração com o back-end
+                        console.log("Payload recebido pelo Front-end:", dados);
+                    }}
+                />
 
                 {/* Botão para alternar entre visão superior 2D e visão imersiva 3D. */}
                 {fase === 'navegando' && (
