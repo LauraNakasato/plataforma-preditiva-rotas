@@ -1,6 +1,7 @@
 "use client";
 
 import BotaoReporte from '../components/BotaoReporte';
+import { compressImageToWebP } from '../utils/imageCompressor';
 
 // Importa os hooks do React utilizados para controlar estados,
 // executar efeitos, guardar referências e memorizar funções.
@@ -4532,8 +4533,36 @@ export default function MapaABC() {
                     listaAberta={listaAberta} 
                     emPerigo={emPerigo}
                     onEnviarReporte={async (dados) => {
-                        // Ponto de integração com o back-end
-                        console.log("Payload recebido pelo Front-end:", dados);
+                        const formData = new FormData();
+                        formData.append('categoria', dados.categoria);
+                        formData.append('latitude', String(dados.latitude));
+                        formData.append('longitude', String(dados.longitude));
+                        formData.append('origem_localizacao', dados.origem_localizacao || 'gps');
+                        formData.append('descricao', dados.descricao || '');
+
+                        // Se houver foto, realiza a compressão em WebP no navegador antes de enviar
+                        if (dados.arquivo_foto) {
+                            try {
+                                const fotoWebP = await compressImageToWebP(dados.arquivo_foto);
+                                formData.append('foto', fotoWebP);
+                            } catch (errFoto) {
+                                console.warn('Erro na compressão WebP, enviando foto original:', errFoto);
+                                formData.append('foto', dados.arquivo_foto);
+                            }
+                        }
+
+                        const resposta = await fetch('/api/community-reports', {
+                            method: 'POST',
+                            body: formData,
+                        });
+
+                        if (!resposta.ok) {
+                            const erroJson = await resposta.json().catch(() => ({}));
+                            throw new Error(erroJson.error || 'Falha ao registrar reporte comunitário.');
+                        }
+
+                        const resultado = await resposta.json();
+                        console.info('Reporte comunitário registrado com sucesso:', resultado);
                     }}
                 />
 
