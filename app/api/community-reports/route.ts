@@ -107,21 +107,13 @@ export async function POST(request: Request) {
             .single();
 
         if (error) {
-            console.warn('[POST /api/community-reports] Aviso Supabase DB:', error.message);
-
-            // Modo de resiliência: se a instância gratuita do Supabase estiver pausada ou offline,
-            // retorna sucesso para o usuário com id simulado para não travar a experiência em campo
+            console.error('[POST /api/community-reports] Erro ao gravar no banco Supabase:', error);
             return NextResponse.json(
                 {
-                    sucesso: true,
-                    aviso: 'Reporte registrado em contingência local (Supabase indisponível ou pausado).',
-                    reporte: {
-                        id: Date.now(),
-                        ...novoReporte,
-                        created_at: new Date().toISOString(),
-                    },
+                    error: `Falha ao gravar o reporte no banco de dados: ${error.message}`,
+                    detalhes: error.details || error.hint || null,
                 },
-                { status: 201 }
+                { status: 500 }
             );
         }
 
