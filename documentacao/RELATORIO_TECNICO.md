@@ -20,7 +20,7 @@ O desenvolvimento foi conduzido seguindo metodologia incremental, estruturado na
 | **2. Frontend & Roteamento** | Criação do aplicativo PWA (Next.js + Leaflet) com motor OSRM e algoritmo de desvio de rotas em tempo real. | `app/MapaABC.js`<br>`app/layout.tsx`<br>`public/manifest.json` |
 | **3. Persistência de Dados** | Modelagem da tabela `zonas_risco` no Supabase e cliente de comunicação frontend. | `app/supabase.js`<br>Esquema SQL da tabela |
 | **4. Microsserviço de Alertas** | Implementação do serviço autônomo em Python (`alert_service`) para ingestão da API do CEMADEN e cálculo de influência espacial (Haversine 3 km). | `alert_service/alert.py`<br>`alert_service/main.py`<br>`pyproject.toml` |
-| **5. Automação de Acesso & PDF** | Autenticação no CEMADEN SGAA com renovação de token (HTTP 401) e gerador de relatórios em PDF com emojis. | `alert_service/report_pdf.py`<br>`alert_service/.env.example` |
+| **5. Automação de Acesso & PDF** | Autenticação no CEMADEN SGAA com renovação de token (HTTP 401) | `alert_service/report_pdf.py`<br>`alert_service/.env.example` |
 | **6. Testes e Documentação** | Simulação de chuvas extremas, validação de evasão de rota e elaboração da documentação técnica. | Suíte de testes CLI (`--simular`, `--once`)<br>`README.md` |
 
 ---
@@ -36,7 +36,6 @@ O desenvolvimento foi conduzido seguindo metodologia incremental, estruturado na
 | **Banco de Dados Cloud** | Supabase (PostgreSQL Gerenciado) | Armazenamento relacional dos pontos ativos de inundação (`zonas_risco`). |
 | **Microsserviço de Coleta**| Python 3.10+ (Poetry / Pip) | Ingestão periódica de dados hidrometeorológicos e análise de risco. |
 | **Fonte de Telemetria** | CEMADEN (WebServices SGAA / PED) | Dados oficiais em tempo real de 20 estações pluviométricas em Santo André. |
-| **Relatórios Executivos** | ReportLab 5.1 + Segoe UI Emoji | Geração automática de relatórios de auditoria em PDF com suporte a emojis. |
 | **Ambiente Operacional** | Windows 11 / Linux (Cross-platform) | Plataforma de desenvolvimento e execução dos serviços. |
 
 ---
@@ -241,8 +240,7 @@ A validação do protótipo foi efetuada através de cenários controlados de te
 | **TC-02** | **Consumo de API Real CEMADEN** | Executar `main.py --once` conectado à internet com credenciais SGAA ativas. | Resposta HTTP 200 contendo telemetria das 14 estações pluviométricas em operação no município. | **Aprovado ✅** |
 | **TC-03** | **Tolerância a Token Expirado** | Forçar token inválido (`--cemaden-token "invalido"`) em chamada real. | Captura do erro HTTP 401, acionamento do SGAA, obtenção de novo JWT e conclusão da rodada sem crash. | **Aprovado ✅** |
 | **TC-04** | **Disparo em Cascata (Tempestade)**| Executar `main.py --once --simular` simulando 35mm a 60mm de chuva. | Disparo de alertas para todos os 7 pontos vulneráveis e geração dos inserts simulados no mock. | **Aprovado ✅** |
-| **TC-05** | **Geração de Relatório PDF** | Avaliar geração de `alert_service/relatorio_alertas.pdf` após cada rodada. | PDF íntegro compilado com tabelas de risco, métricas e emojis renderizados corretamente. | **Aprovado ✅** |
-| **TC-06** | **Compatibilidade Mobile PWA** | Acessar via smartphone em rede local (`bun run dev -- -H 0.0.0.0`), testando orientação 3D e GPS. | Câmera inclinada a 55° (*heading-up*), GPS snap-to-route responsivo e tela sem desligar (WakeLock). | **Aprovado ✅** |
+| **TC-05** | **Compatibilidade Mobile PWA** | Acessar via smartphone em rede local (`bun run dev -- -H 0.0.0.0`), testando orientação 3D e GPS. | Câmera inclinada a 55° (*heading-up*), GPS snap-to-route responsivo e tela sem desligar (WakeLock). | **Aprovado ✅** |
 
 ---
 
@@ -272,7 +270,6 @@ Durante os ciclos de testes e refinamento do projeto, foram realizadas as seguin
    - *Motivo:* Os tokens fornecidos pelo CEMADEN expiram a cada 7 a 10 dias. Implementou-se a classe `CemadenSessao` que renova o token automaticamente via requisição HTTP POST ao endpoint SGAA caso ocorra `HTTP 401`, eliminando manutenção manual.
 3. **Criação do Modo Mock no Banco de Dados (`MOCK_SUPABASE=true`)**:
    - *Motivo:* A chave pública (`anon`) do Supabase possui permissões restritas a `SELECT` por políticas de segurança RLS. O modo mock permitiu testar toda a lógica de disparo de alertas sem depender da concessão da chave administrativa `service_role`.
-4. **Substituição da Saída de Terminal por Relatório PDF Executivo**:
-   - *Motivo:* Apenas exibir logs no console dificultava auditorias de segurança e apresentações. Desenvolveu-se o módulo `report_pdf.py` com ReportLab e suporte a fontes Unicode/Emojis (`Segoe UI Emoji`), gerando relatórios de alta qualidade visual para órgãos públicos ou defesa civil.
-5. **Ajuste de Resiliência de Estações Offline**:
+4. **Ajuste de Resiliência de Estações Offline**:
    - *Motivo:* Das 20 estações cadastradas em Santo André, constatou-se que apenas 14 transmitiam dados em tempo real no momento dos testes. A lógica espacial foi configurada para correlacionar múltiplas estações vizinhas (raio de 3 km) a cada ponto crítico, evitando pontos cegos caso um pluviômetro esteja fora do ar.
+
